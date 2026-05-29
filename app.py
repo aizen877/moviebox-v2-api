@@ -40,6 +40,9 @@ logger = logging.getLogger("moviebox_v2_api")
 # --- fast HTTP layer ---------------------------------------------------------
 
 BASE = HOST_URL.rstrip("/")
+# "More like this" / recommendations live on the v1 host under a different
+# path prefix (/wefeed-h5-bff/web). The v2 host (h5-api) 404s on it.
+REC_BASE = "https://h5.aoneroom.com"
 FAST_HEADERS = {
     "X-Client-Info": '{"timezone":"Africa/Nairobi"}',
     "Accept-Language": "en-US,en;q=0.5",
@@ -59,6 +62,7 @@ _CACHE: dict[str, tuple[float, object]] = {}
 HOMEPAGE_TTL = 300.0   # 5 min
 SEARCH_TTL = 120.0     # 2 min
 DETAILS_TTL = 600.0    # 10 min
+RECOMMEND_TTL = 600.0  # 10 min
 
 
 def _cache_get(key: str):
@@ -141,6 +145,16 @@ async def _api_get(path: str, params: dict | None = None) -> dict | list:
     raise HTTPException(status_code=502, detail=f"Upstream error: {j.get('message')!r}")
 
 
+async def _rec_get(path: str, params: dict | None = None) -> dict | list:
+    """GET an endpoint on the recommendation host (h5.aoneroom.com)."""
+    r = await app.state.client.get(REC_BASE + path, params=params or {})
+    r.raise_for_status()
+    j = r.json()
+    if j.get("code", 1) == 0 and j.get("message") == "ok":
+        return j["data"]
+    raise HTTPException(status_code=502, detail=f"Upstream error: {j.get('message')!r}")
+
+
 async def _api_post(path: str, json_body: dict) -> dict | list:
     r = await app.state.client.post(BASE + path, json=json_body)
     r.raise_for_status()
@@ -159,7 +173,7 @@ def read_root():
         "status": "online",
         "service": "Moviebox Unofficial API (v2 H5 REST Backend)",
         "docs": "/docs",
-        "endpoints": ["/homepage", "/search?q=", "/details/{id}", "/download/{id}"],
+        "endpoints": ["/homepage", "/search?q=", "/details/{id}", "/download/{id}", "/recommend/{id}"],
         "message": "All stream qualities + subtitles in a single request. 🚀",
     }
 
@@ -425,6 +439,70 @@ async def get_download_links(
         raise
     except Exception as e:
         logger.error(f"Error fetching download links for '{detail_path}': {e}")
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+def _shape_recommend_item(it: dict) -> dict:
+    """Trim a raw recommend item to the useful fields."""
+    cover = it.get("cover") or {}
+    stype = it.get("subjectType")
+    return {
+        "title": it.get("title"),
+        "subject_id": it.get("subjectId"),
+        "detail_path": it.get("detailPath"),
+        "subject_type": _SUBJECT_TYPE_NAME.get(stype, str(stype)),
+        "release_date": it.get("releaseDate", ""),
+        "genre": it.get("genre", ""),
+        "imdb_rating": it.get("imdbRatingValue") or it.get("imdbRate"),
+        "cover_image": cover.get("url"),
+    }
+
+
+@app.get("/recommend/{detail_path}")
+async def get_recommendations(
+    detail_path: str,
+    page: int = Query(1, ge=1, description="Page number"),
+    per_page: int = Query(12, ge=1, le=48, description="Items per page"),
+):
+    """"More like this" - related movies / series for a given item.
+
+    `id` may be a numeric subjectId or a detailPath. A detailPath is resolved to
+    its subjectId first (the upstream rec endpoint needs the numeric id). Cached.
+    """
+    cache_key = f"recommend:{detail_path}:{page}:{per_page}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return {**cached, "cached": True}
+
+    try:
+        subject_id = detail_path
+        if not detail_path.isdigit():
+            details_data = await _fetch_details(detail_path)
+            subject_id = ((details_data or {}).get("subject") or {}).get("subjectId")
+            if not subject_id:
+                raise HTTPException(status_code=404, detail="Could not resolve subjectId")
+
+        data = await _rec_get(
+            "/wefeed-h5-bff/web/subject/detail-rec",
+            {"subjectId": subject_id, "page": page, "perPage": per_page},
+        )
+        items = (data or {}).get("items", []) or []
+        shaped = [_shape_recommend_item(it) for it in items]
+        result = {
+            "status": "success",
+            "cached": False,
+            "detail_path": detail_path,
+            "subject_id": subject_id,
+            "page": page,
+            "count": len(shaped),
+            "items": shaped,
+        }
+        _cache_set(cache_key, result, RECOMMEND_TTL)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching recommendations for '{detail_path}': {e}")
         raise HTTPException(status_code=502, detail=str(e))
 
 

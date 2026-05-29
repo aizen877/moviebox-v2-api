@@ -15,6 +15,7 @@ single request**.
 | GET | `/search?q=Titanic&type=movies&page=1` | Search |
 | GET | `/details/{id}` | Item details (`id` = subjectId or detailPath) + seasons summary |
 | GET | `/download/{id}?season=1&episode=1` | All stream links + subtitles |
+| GET | `/recommend/{id}?page=1&per_page=12` | "More like this" - related titles |
 
 ### Examples
 
@@ -22,6 +23,7 @@ single request**.
 /search?q=Titanic&type=movies
 /details/merlin-sMxCiIO6fZ9
 /download/merlin-sMxCiIO6fZ9?season=1&episode=2     # tv-series
+/recommend/titans-q33meCQkvT7                       # more like this
 ```
 
 `type` accepts: `all, movies, tv_series, anime, music, education`.
