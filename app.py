@@ -44,8 +44,8 @@ BASE = HOST_URL.rstrip("/")
 # path prefix (/wefeed-h5-bff/web). The v2 host (h5-api) 404s on it.
 REC_BASE = "https://h5.aoneroom.com"
 FAST_HEADERS = {
-    "X-Client-Info": '{"timezone":"Africa/Nairobi"}',
-    "Accept-Language": "en-US,en;q=0.5",
+    "X-Client-Info": '{"timezone":"Asia/Dhaka"}',
+    "Accept-Language": "bn-BD,bn;q=0.9,en-US;q=0.8,en;q=0.5",
     "Accept": "application/json",
     "Accept-Encoding": "gzip",
     "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:137.0) Gecko/20100101 Firefox/137.0",
@@ -184,15 +184,25 @@ def health():
 
 
 @app.get("/homepage")
-async def get_homepage():
-    """Landing-page content listings (cached 5 min)."""
-    cached = _cache_get("homepage")
+async def get_homepage(
+    host: str = Query(
+        "moviebox.com.bd",
+        description="MovieBox content host/region (e.g. moviebox.com.bd, moviebox.ph)",
+    ),
+):
+    """Landing-page content listings (cached 5 min).
+
+    Note: MovieBox decides content region primarily from the server egress IP,
+    not this `host` param. It's exposed for flexibility but may not change much.
+    """
+    cache_key = f"homepage:{host}"
+    cached = _cache_get(cache_key)
     if cached is not None:
-        return {"status": "success", "cached": True, "data": cached}
+        return {"status": "success", "cached": True, "host": host, "data": cached}
     try:
-        data = await _api_get("/wefeed-h5api-bff/home", {"host": "moviebox.ph"})
-        _cache_set("homepage", data, HOMEPAGE_TTL)
-        return {"status": "success", "cached": False, "data": data}
+        data = await _api_get("/wefeed-h5api-bff/home", {"host": host})
+        _cache_set(cache_key, data, HOMEPAGE_TTL)
+        return {"status": "success", "cached": False, "host": host, "data": data}
     except HTTPException:
         raise
     except Exception as e:
