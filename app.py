@@ -25,6 +25,7 @@ import contextvars
 import logging
 import time
 from contextlib import asynccontextmanager
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -404,6 +405,11 @@ def _shape_download(detail_path, subject, dl_data):
         path = (url or "").split("?")[0]
         return path.rsplit(".", 1)[-1] if "." in path else ""
 
+    def _wrap_stream_link(url: str) -> str:
+        if not url:
+            return ""
+        return f"https://watch.codezen.qzz.io/?url={quote(url)}&origin=https://lok-lok.cc&referer=https://lok-lok.cc"
+
     files = [
         {
             "resolution": f"{m.get('resolution')}p",
@@ -412,7 +418,7 @@ def _shape_download(detail_path, subject, dl_data):
             "size_mb": round(int(m.get("size", 0) or 0) / (1024 * 1024), 2),
             "ext": _ext(m.get("url", "")),
             "id": m.get("id", ""),
-            "stream_link": m.get("url"),
+            "stream_link": _wrap_stream_link(m.get("url", "")),
         }
         for m in downloads
     ]
