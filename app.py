@@ -21,12 +21,13 @@ Endpoints:
 """
 
 import asyncio
+import contextvars
 import logging
 import time
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -98,6 +99,24 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# ContextVar to store client IP per request context
+client_ip_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("client_ip", default=None)
+
+# Middleware to capture client IP from request headers (e.g. Render reverse proxy)
+@app.middleware("http")
+async def capture_client_ip(request: Request, call_next):
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        ip = forwarded_for.split(",")[0].strip()
+    else:
+        ip = request.client.host if request.client else None
+    token = client_ip_var.set(ip)
+    try:
+        response = await call_next(request)
+    finally:
+        client_ip_var.reset(token)
+    return response
+
 app.add_middleware(GZipMiddleware, minimum_size=512)
 app.add_middleware(
     CORSMiddleware,
@@ -137,7 +156,16 @@ _SUBJECT_TYPE_NAME = {
 
 async def _api_get(path: str, params: dict | None = None) -> dict | list:
     """GET an H5 endpoint via the shared client and unwrap the data envelope."""
-    r = await app.state.client.get(BASE + path, params=params or {})
+    headers = {}
+    ip = client_ip_var.get()
+    if ip:
+        headers.update({
+            "X-Forwarded-For": ip,
+            "X-Real-IP": ip,
+            "Client-IP": ip,
+            "CF-Connecting-IP": ip
+        })
+    r = await app.state.client.get(BASE + path, params=params or {}, headers=headers)
     r.raise_for_status()
     j = r.json()
     if j.get("code", 1) == 0 and j.get("message") == "ok":
@@ -147,7 +175,16 @@ async def _api_get(path: str, params: dict | None = None) -> dict | list:
 
 async def _rec_get(path: str, params: dict | None = None) -> dict | list:
     """GET an endpoint on the recommendation host (h5.aoneroom.com)."""
-    r = await app.state.client.get(REC_BASE + path, params=params or {})
+    headers = {}
+    ip = client_ip_var.get()
+    if ip:
+        headers.update({
+            "X-Forwarded-For": ip,
+            "X-Real-IP": ip,
+            "Client-IP": ip,
+            "CF-Connecting-IP": ip
+        })
+    r = await app.state.client.get(REC_BASE + path, params=params or {}, headers=headers)
     r.raise_for_status()
     j = r.json()
     if j.get("code", 1) == 0 and j.get("message") == "ok":
@@ -156,7 +193,16 @@ async def _rec_get(path: str, params: dict | None = None) -> dict | list:
 
 
 async def _api_post(path: str, json_body: dict) -> dict | list:
-    r = await app.state.client.post(BASE + path, json=json_body)
+    headers = {}
+    ip = client_ip_var.get()
+    if ip:
+        headers.update({
+            "X-Forwarded-For": ip,
+            "X-Real-IP": ip,
+            "Client-IP": ip,
+            "CF-Connecting-IP": ip
+        })
+    r = await app.state.client.post(BASE + path, json=json_body, headers=headers)
     r.raise_for_status()
     j = r.json()
     if j.get("code", 1) == 0 and j.get("message") == "ok":
