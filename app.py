@@ -155,10 +155,47 @@ _SUBJECT_TYPE_NAME = {
 }
 
 
+def _resolve_spoofed_ip(params: dict | None = None, json_body: dict | None = None) -> str | None:
+    """Resolve regional spoofed IP based on host parameters or client request."""
+    # 1. Map known hosts to regional public IPs
+    host = None
+    if params and "host" in params:
+        host = params["host"]
+    elif json_body and "host" in json_body:
+        host = json_body["host"]
+
+    if host == "moviebox.com.bd":
+        return "103.191.240.1"  # Real public BD IP (AmberIT)
+    elif host == "moviebox.ph":
+        return "112.198.115.36"  # Real public PH IP (Globe Telecom)
+
+    # 2. Get client IP from request context (middleware)
+    ip = client_ip_var.get()
+
+    # 3. Fallback to BD IP for cloud datacenters or missing/local IPs
+    if not ip or ip in ("127.0.0.1", "localhost", "::1"):
+        return "103.191.240.1"
+
+    # Fallback for private networks
+    if (
+        ip.startswith("10.") or 
+        ip.startswith("192.168.") or 
+        ip.startswith("172.16.") or 
+        ip.startswith("172.17.") or 
+        ip.startswith("172.18.") or 
+        ip.startswith("172.19.") or 
+        ip.startswith("172.2") or 
+        ip.startswith("172.3")
+    ):
+        return "103.191.240.1"
+
+    return ip
+
+
 async def _api_get(path: str, params: dict | None = None) -> dict | list:
     """GET an H5 endpoint via the shared client and unwrap the data envelope."""
     headers = {}
-    ip = client_ip_var.get()
+    ip = _resolve_spoofed_ip(params=params)
     if ip:
         headers.update({
             "X-Forwarded-For": ip,
@@ -177,7 +214,7 @@ async def _api_get(path: str, params: dict | None = None) -> dict | list:
 async def _rec_get(path: str, params: dict | None = None) -> dict | list:
     """GET an endpoint on the recommendation host (h5.aoneroom.com)."""
     headers = {}
-    ip = client_ip_var.get()
+    ip = _resolve_spoofed_ip(params=params)
     if ip:
         headers.update({
             "X-Forwarded-For": ip,
@@ -195,7 +232,7 @@ async def _rec_get(path: str, params: dict | None = None) -> dict | list:
 
 async def _api_post(path: str, json_body: dict) -> dict | list:
     headers = {}
-    ip = client_ip_var.get()
+    ip = _resolve_spoofed_ip(json_body=json_body)
     if ip:
         headers.update({
             "X-Forwarded-For": ip,
