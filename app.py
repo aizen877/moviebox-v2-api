@@ -460,9 +460,8 @@ async def get_download_links(
 ):
     """All available stream / download links + subtitles in a single request.
 
-    Fast path: the /detail and /download calls run in PARALLEL on the shared
-    keep-alive connection pool. /download works directly from detailPath, so we
-    don't need to wait for /detail to discover the subjectId. Result is cached.
+    Fetches details first to resolve both correct subjectId and detailPath slug,
+    ensuring the upstream H5 API returns the correct downloads list. Result is cached.
     """
     cache_key = f"download:{detail_path}:{season}:{episode}"
     cached = _cache_get(cache_key)
@@ -470,28 +469,35 @@ async def get_download_links(
         return {**cached, "cached": True}
 
     try:
-        # Kick off both requests concurrently.
-        details_task = asyncio.create_task(_fetch_details(detail_path))
-        dl_task = asyncio.create_task(
-            _api_get(
-                "/wefeed-h5api-bff/subject/download",
-                _download_params(detail_path, season, episode),
-            )
-        )
-
-        details_data = await details_task
+        # First resolve details to get correct subjectId and detailPath slug
+        details_data = await _fetch_details(detail_path)
         subject = (details_data or {}).get("subject") or {}
+        subject_id = subject.get("subjectId")
+        detail_path_slug = subject.get("detailPath")
 
-        # If it's a tv-series and the caller didn't pass se/ep, re-fetch E1.
+        if not subject_id or not detail_path_slug:
+            raise HTTPException(status_code=404, detail="Could not resolve subject details")
+
+        # Determine correct season/episode
+        se_val = season if isinstance(season, int) else 0
+        ep_val = episode if isinstance(episode, int) else 0
+
         is_series = subject.get("subjectType") == SubjectType.TV_SERIES.value
-        if is_series and season == 0 and episode == 0:
-            dl_task.cancel()
-            dl_data = await _api_get(
-                "/wefeed-h5api-bff/subject/download",
-                _download_params(detail_path, 1, 1),
-            )
-        else:
-            dl_data = await dl_task
+        se = se_val
+        ep = ep_val
+        if is_series and se_val == 0 and ep_val == 0:
+            se = 1
+            ep = 1
+
+        params = {
+            "subjectId": str(subject_id),
+            "detailPath": str(detail_path_slug),
+            "se": se,
+            "ep": ep,
+        }
+
+        # Query the download endpoint with both correct fields
+        dl_data = await _api_get("/wefeed-h5api-bff/subject/download", params)
 
         result = _shape_download(detail_path, subject, dl_data)
         result["cached"] = False
