@@ -376,6 +376,23 @@ def _shape_seasons(details_data: dict) -> dict:
     }
 
 
+def _shape_dubs(details_data: dict) -> list[dict]:
+    """Build a clean list of available dubs/audio tracks from raw /detail payload."""
+    data = details_data or {}
+    subject = data.get("subject") or {}
+    raw_dubs = subject.get("dubs") or []
+    dubs = []
+    for d in raw_dubs:
+        dubs.append({
+            "subject_id": str(d.get("subjectId")),
+            "detail_path": d.get("detailPath"),
+            "language_name": d.get("lanName"),
+            "language_code": d.get("lanCode"),
+            "is_original": d.get("original", False)
+        })
+    return dubs
+
+
 @app.get("/details/{detail_path}")
 async def get_details(detail_path: str):
     """Specific item details (id = subjectId or detailPath, cached 10 min).
@@ -391,6 +408,7 @@ async def get_details(detail_path: str):
             "cached": True,
             "detail_path": detail_path,
             "seasons": _shape_seasons(cached),
+            "dubs": _shape_dubs(cached),
             "data": cached,
         }
     try:
@@ -400,6 +418,7 @@ async def get_details(detail_path: str):
             "cached": False,
             "detail_path": detail_path,
             "seasons": _shape_seasons(data),
+            "dubs": _shape_dubs(data),
             "data": data,
         }
     except HTTPException:
