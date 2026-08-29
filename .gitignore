@@ -1,4 +1,53 @@
-__pycache__/
+```gitignore
+# Compiled and build artifacts
 *.pyc
+__pycache__/
+*.o
+*.obj
+*.out
+*.so
+*.dll
+*.exe
+*.class
+*.a
+
+# Dependencies
 .venv/
+venv/
 .env
+.env.local
+*.env.*
+
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Coverage reports
+coverage/
+htmlcov/
+.coverage
+
+# Build directories
+dist/
+build/
+target/
+*.egg-info/
+
+# Cache directories
+.mypy_cache/
+.pytest_cache/
+.gradle/
+node_modules/
+```
