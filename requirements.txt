@@ -1,3 +1,3 @@
-moviebox-api==0.5.3
+git+https://github.com/aizen877/moviebox-api.git@main#egg=moviebox-api&subdirectory=.
 fastapi>=0.110
 uvicorn[standard]>=0.29

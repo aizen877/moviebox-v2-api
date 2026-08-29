@@ -1,53 +1,35 @@
-```gitignore
-# Compiled and build artifacts
-*.pyc
-__pycache__/
-*.o
-*.obj
-*.out
-*.so
-*.dll
-*.exe
-*.class
-*.a
-
+```
 # Dependencies
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 .venv/
 venv/
 .env
 .env.local
-*.env.*
+.env.*
 
-# Logs and temp files
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Logs and temporary files
 *.log
 *.tmp
 *.swp
-*.swo
 
 # Editors
 .vscode/
 .idea/
-*.sublime-project
-*.sublime-workspace
 
-# System files
-.DS_Store
-Thumbs.db
-
-# Coverage reports
+# Coverage
+.coverage
 coverage/
 htmlcov/
-.coverage
 
-# Build directories
-dist/
-build/
-target/
-*.egg-info/
-
-# Cache directories
-.mypy_cache/
+# Testing
 .pytest_cache/
-.gradle/
-node_modules/
+.mypy_cache/
 ```
