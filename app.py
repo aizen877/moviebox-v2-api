@@ -464,7 +464,8 @@ def _shape_download(detail_path, subject, dl_data):
     def _wrap_stream_link(url: str) -> str:
         if not url:
             return ""
-        return f"https://watch.codezen.qzz.io/?url={quote(url)}&origin=https://lok-lok.cc&referer=https://lok-lok.cc"
+        # Removed proxy/wrapper, returning original URL directly
+        return url
 
     files = [
         {
