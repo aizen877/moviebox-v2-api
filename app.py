@@ -585,7 +585,7 @@ async def dashboard(request: Request):
             <h1>Ultra-Fast MovieBox<br>Streaming Gateway</h1>
             <p>Direct MP4 stream extractor, subtitle aggregator, real-time search engine, and metadata provider with zero web scraping.</p>
             <form class="tester-box" onsubmit="handleQuickTest(event)">
-                <input id="quickInput" type="text" class="tester-input" placeholder="Search title or enter slug (e.g. Attack on Titan, Bad Sister)..." value="Bad Sister">
+                <input id="quickInput" type="text" class="tester-input" placeholder="Search title or enter slug (e.g. Attack on Titan, Bad Sister)..." value="Attack on Titan">
                 <button type="submit" class="tester-btn">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
                     Test Search
@@ -606,8 +606,8 @@ async def dashboard(request: Request):
                 <p class="card-desc">All direct MP4 streaming resolutions (360p - 1080p), file sizes in MB, and complete multi-language subtitles in one single call.</p>
                 <div class="endpoint-pill"><span>/download/{slug_or_id}?se=1&ep=1</span></div>
                 <div class="card-actions">
-                    <a href="/download/bad-sister-UIYLsDZFSg3" target="_blank" class="action-btn btn-launch">Execute Query</a>
-                    <button onclick="copyToClipboard('/download/bad-sister-UIYLsDZFSg3')" class="action-btn btn-copy" title="Copy endpoint">
+                    <a href="/download/attack-on-titan-hindi-kGWQOIx0d4?se=1&ep=1" target="_blank" class="action-btn btn-launch">Execute Query</a>
+                    <button onclick="copyToClipboard('/download/attack-on-titan-hindi-kGWQOIx0d4?se=1&ep=1')" class="action-btn btn-copy" title="Copy endpoint">
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                     </button>
                 </div>
@@ -1113,15 +1113,29 @@ async def get_download_links(
         if not domain.startswith("http"):
             domain = "https://netfilm.world"
 
+        type_str = "/tv/detail" if is_series else "/movie/detail"
         player_referer = (
             f"{domain}/spa/videoPlayPage/movies/{detail_path_slug}"
-            f"?id={subject_id}&type=/movie/detail&detailSe={eff_se}&detailEp={eff_ep}&lang=en"
+            f"?id={subject_id}&type={type_str}&detailSe={eff_se}&detailEp={eff_ep}&lang=en"
         )
         play_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={eff_se}&ep={eff_ep}&detailPath={detail_path_slug}"
 
         token = await _get_bearer_token()
+        
+        # Spoofed residential IP headers to bypass datacenter blocking on cloud hosts
+        ip = _resolve_spoofed_ip()
+        ip_headers = {}
+        if ip:
+            ip_headers = {
+                "X-Forwarded-For": ip,
+                "X-Real-IP": ip,
+                "Client-IP": ip,
+                "CF-Connecting-IP": ip,
+            }
+
         headers = {
             **PLAYER_HEADERS,
+            **ip_headers,
             "Referer": player_referer,
             "Authorization": f"Bearer {token}" if token else ""
         }
@@ -1298,8 +1312,19 @@ async def get_stream_sources(subject_id: str, detail_path: str = "", se: int = 1
         play_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}"
 
         token = await _get_bearer_token()
+        ip = _resolve_spoofed_ip()
+        ip_headers = {}
+        if ip:
+            ip_headers = {
+                "X-Forwarded-For": ip,
+                "X-Real-IP": ip,
+                "Client-IP": ip,
+                "CF-Connecting-IP": ip,
+            }
+
         headers = {
             **PLAYER_HEADERS,
+            **ip_headers,
             "Referer": player_referer,
             "Authorization": f"Bearer {token}" if token else ""
         }
@@ -1360,8 +1385,19 @@ async def get_captions(subject_id: str, detail_path: str = "", se: int = 1, ep: 
         play_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}"
 
         token = await _get_bearer_token()
+        ip = _resolve_spoofed_ip()
+        ip_headers = {}
+        if ip:
+            ip_headers = {
+                "X-Forwarded-For": ip,
+                "X-Real-IP": ip,
+                "Client-IP": ip,
+                "CF-Connecting-IP": ip,
+            }
+
         headers = {
             **PLAYER_HEADERS,
+            **ip_headers,
             "Referer": player_referer,
             "Authorization": f"Bearer {token}" if token else ""
         }
