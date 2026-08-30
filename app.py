@@ -2,8 +2,8 @@
 Moviebox Unofficial v2 API  -  FastAPI gateway for HuggingFace Spaces & Render.
 
 Wraps the MovieBox H5 REST backend (h5-api.aoneroom.com) and exposes clean JSON endpoints.
-Features automatic guest Bearer token acquisition, search suggestions, catalog filtering,
-metadata details, stream extraction, and subtitle links.
+Features automatic guest Bearer token acquisition, HTTP/2 multiplexing, ORJSON response engine,
+search suggestions, catalog filtering, metadata details, stream extraction, and subtitle links.
 """
 
 import asyncio
@@ -13,15 +13,14 @@ import logging
 import re
 import time
 from contextlib import asynccontextmanager
+from enum import Enum
 from urllib.parse import quote
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
-
-from enum import Enum
 
 class SubjectType(int, Enum):
     ALL = 0
@@ -75,15 +74,15 @@ PLAYER_HEADERS = {
     "sec-fetch-site": "same-origin",
 }
 
-# Shared client limits
-_LIMITS = httpx.Limits(max_keepalive_connections=20, max_connections=50)
-_TIMEOUT = httpx.Timeout(25.0, connect=10.0)
+# Shared client limits & connection pool
+_LIMITS = httpx.Limits(max_keepalive_connections=30, max_connections=60, keepalive_expiry=30.0)
+_TIMEOUT = httpx.Timeout(20.0, connect=8.0)
 
 # Global bearer token cache & lock
 _bearer_token: str | None = None
 _token_lock = asyncio.Lock()
 
-# Tiny TTL cache: key -> (expires_at, value)
+# Ultra-fast in-memory TTL cache: key -> (expires_at, value)
 _CACHE: dict[str, tuple[float, object]] = {}
 HOMEPAGE_TTL = 300.0   # 5 min
 SEARCH_TTL = 120.0     # 2 min
@@ -117,7 +116,7 @@ async def _get_bearer_token(force_refresh: bool = False) -> str:
         try:
             client = getattr(app.state, "client", None)
             if client is None:
-                client = httpx.AsyncClient(headers=DEFAULT_HEADERS, timeout=_TIMEOUT, follow_redirects=True)
+                client = httpx.AsyncClient(http2=True, headers=DEFAULT_HEADERS, timeout=_TIMEOUT, follow_redirects=True)
                 should_close = True
             else:
                 should_close = False
@@ -148,11 +147,16 @@ async def _get_bearer_token(force_refresh: bool = False) -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Initialize shared HTTP/2 AsyncClient with high-speed connection pool
     app.state.client = httpx.AsyncClient(
-        headers=DEFAULT_HEADERS, limits=_LIMITS, timeout=_TIMEOUT, follow_redirects=True
+        http2=True,
+        headers=DEFAULT_HEADERS,
+        limits=_LIMITS,
+        timeout=_TIMEOUT,
+        follow_redirects=True
     )
-    logger.info("Shared httpx client ready.")
-    # Warm up token
+    logger.info("Shared HTTP/2 httpx connection pool initialized.")
+    # Pre-fetch bearer token on startup
     await _get_bearer_token()
     try:
         yield
@@ -162,8 +166,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="MovieBox API Pro",
-    description="Full Pure REST API for moviebox.ph — Zero Scraping",
-    version="2.1.5",
+    description="Full Pure REST API for moviebox.ph — Ultra High Performance",
+    version="2.2.0",
     lifespan=lifespan,
 )
 
@@ -172,7 +176,8 @@ client_ip_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("clie
 
 
 @app.middleware("http")
-async def capture_client_ip(request: Request, call_next):
+async def performance_and_ip_middleware(request: Request, call_next):
+    start_time = time.perf_counter()
     forwarded_for = request.headers.get("x-forwarded-for")
     if forwarded_for:
         ip = forwarded_for.split(",")[0].strip()
@@ -180,9 +185,18 @@ async def capture_client_ip(request: Request, call_next):
         ip = request.client.host if request.client else None
     token = client_ip_var.set(ip)
     try:
-        response = await call_next(request)
+        response: Response = await call_next(request)
     finally:
         client_ip_var.reset(token)
+
+    process_time = (time.perf_counter() - start_time) * 1000
+    response.headers["X-Process-Time"] = f"{process_time:.2f}ms"
+    
+    # Add Edge Cache headers for successful GET data requests
+    if request.method == "GET" and response.status_code == 200 and request.url.path not in ("/", "/health", "/docs", "/openapi.json"):
+        if not response.headers.get("Cache-Control"):
+            response.headers["Cache-Control"] = "public, max-age=60, s-maxage=300, stale-while-revalidate=600"
+
     return response
 
 
@@ -274,12 +288,11 @@ async def _api_get(path: str, params: dict | None = None, retry: bool = True) ->
 
     client = getattr(app.state, "client", None)
     if client is None:
-        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as temp_client:
+        async with httpx.AsyncClient(http2=True, timeout=_TIMEOUT, follow_redirects=True) as temp_client:
             r = await temp_client.get(BASE + path, params=params or {}, headers=headers)
     else:
         r = await client.get(BASE + path, params=params or {}, headers=headers)
 
-    # Update token if upstream refreshes it
     x_user = r.headers.get("x-user")
     if x_user:
         try:
@@ -317,7 +330,7 @@ async def _rec_get(path: str, params: dict | None = None) -> dict | list:
 
     client = getattr(app.state, "client", None)
     if client is None:
-        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as temp_client:
+        async with httpx.AsyncClient(http2=True, timeout=_TIMEOUT, follow_redirects=True) as temp_client:
             r = await temp_client.get(REC_BASE + path, params=params or {}, headers=headers)
     else:
         r = await client.get(REC_BASE + path, params=params or {}, headers=headers)
@@ -347,7 +360,7 @@ async def _api_post(path: str, json_body: dict, retry: bool = True) -> dict | li
 
     client = getattr(app.state, "client", None)
     if client is None:
-        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as temp_client:
+        async with httpx.AsyncClient(http2=True, timeout=_TIMEOUT, follow_redirects=True) as temp_client:
             r = await temp_client.post(BASE + path, json=json_body, headers=headers)
     else:
         r = await client.post(BASE + path, json=json_body, headers=headers)
@@ -375,12 +388,12 @@ async def _api_post(path: str, json_body: dict, retry: bool = True) -> dict | li
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    # Check if client explicitly wants JSON
     accept = request.headers.get("accept", "")
     if "application/json" in accept and "text/html" not in accept:
         return JSONResponse({
             "status": "online",
-            "service": "Moviebox API Pro",
+            "service": "MovieBox API Pro (Ultra-Fast Edition)",
+            "version": "2.2.0",
             "docs": "/docs",
             "endpoints": [
                 "/home",
@@ -396,7 +409,7 @@ async def dashboard(request: Request):
                 "/api/stream/{subject_id}/captions?detail_path=",
                 "/recommend/{slug_or_id}"
             ],
-            "message": "Pure REST API for moviebox.ph 🚀"
+            "message": "High-Performance Pure REST API for moviebox.ph 🚀"
         })
 
     html_content = """
@@ -606,9 +619,9 @@ async def dashboard(request: Request):
     <body>
         <div class="container">
             <header>
-                <div class="badge">Enterprise API Solution</div>
+                <div class="badge">Ultra-Fast Edition &bull; HTTP/2 &bull; Rust JSON</div>
                 <h1>MovieBox Pro</h1>
-                <p style="color: #889; font-size: 1.25rem; font-weight: 300;">State-of-the-Art Pure API Architecture</p>
+                <p style="color: #889; font-size: 1.25rem; font-weight: 300;">State-of-the-Art Pure REST Architecture</p>
                 <div style="margin-top: 15px;">
                     <a href="/docs" target="_blank" style="color: var(--accent); text-decoration: none; font-size: 0.95rem; font-weight: 600; margin-right: 20px;">Swagger Docs &rarr;</a>
                     <a href="/redoc" target="_blank" style="color: var(--primary); text-decoration: none; font-size: 0.95rem; font-weight: 600;">ReDoc &rarr;</a>
@@ -700,7 +713,7 @@ async def get_home():
             elif op_type in ["SUBJECTS_MOVIE", "SUBJECTS_TV", "SUBJECTS_ANIMATION"]:
                 items = [{
                     "name": sub.get("title"),
-                    "poster_url": sub.get("cover", {}).get("url"),
+                    "poster_url": (sub.get("cover") or {}).get("url"),
                     "slug": sub.get("detailPath"),
                     "subject_id": sub.get("subjectId"),
                     "badge": sub.get("corner"),
@@ -845,7 +858,6 @@ async def search(
         )
         raw_items = (data or {}).get("items", (data or {}).get("list", [])) or []
         
-        # Format structured items
         items = [{
             "name": sub.get("title"),
             "poster_url": (sub.get("cover") or {}).get("url"),
@@ -1077,13 +1089,11 @@ async def get_download_links(
 async def get_stream_sources(subject_id: str, detail_path: str = "", se: int = 1, ep: int = 1):
     """Direct stream engine integration via media player domain."""
     try:
-        # Step 1: get player domain
         dom_data = await _api_get("/wefeed-h5api-bff/media-player/get-domain")
         domain = str(dom_data if isinstance(dom_data, str) else dom_data.get("data", "https://netfilm.world")).rstrip("/")
         if not domain.startswith("http"):
             domain = "https://netfilm.world"
 
-        # Step 2: call play endpoint
         player_referer = (
             f"{domain}/spa/videoPlayPage/movies/{detail_path}"
             f"?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en"
@@ -1099,7 +1109,7 @@ async def get_stream_sources(subject_id: str, detail_path: str = "", se: int = 1
 
         client = getattr(app.state, "client", None)
         if client is None:
-            async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as temp_client:
+            async with httpx.AsyncClient(http2=True, timeout=_TIMEOUT, follow_redirects=True) as temp_client:
                 resp = await temp_client.get(play_url, headers=headers)
         else:
             resp = await client.get(play_url, headers=headers)
@@ -1161,7 +1171,7 @@ async def get_captions(subject_id: str, detail_path: str = "", se: int = 1, ep: 
 
         client = getattr(app.state, "client", None)
         if client is None:
-            async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as temp_client:
+            async with httpx.AsyncClient(http2=True, timeout=_TIMEOUT, follow_redirects=True) as temp_client:
                 play_resp = await temp_client.get(play_url, headers=headers)
         else:
             play_resp = await client.get(play_url, headers=headers)

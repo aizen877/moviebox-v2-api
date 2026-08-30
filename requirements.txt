@@ -1,3 +1,4 @@
-git+https://github.com/aizen877/moviebox-api.git@main#egg=moviebox-api&subdirectory=.
-fastapi>=0.110
-uvicorn[standard]>=0.29
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+httpx[http2]>=0.27.0
+orjson>=3.9.0
