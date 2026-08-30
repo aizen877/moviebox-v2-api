@@ -2,8 +2,8 @@
 Moviebox Unofficial v2 API  -  FastAPI gateway for HuggingFace Spaces & Render.
 
 Wraps the MovieBox H5 REST backend (h5-api.aoneroom.com) and exposes clean JSON endpoints.
-Features automatic guest Bearer token acquisition, HTTP/2 multiplexing, ORJSON response engine,
-search suggestions, catalog filtering, metadata details, stream extraction, and subtitle links.
+Features automatic guest Bearer token acquisition, HTTP/2 multiplexing, search suggestions,
+catalog filtering, metadata details, high-speed direct stream extraction, and subtitle links.
 """
 
 import asyncio
@@ -147,7 +147,6 @@ async def _get_bearer_token(force_refresh: bool = False) -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize shared HTTP/2 AsyncClient with high-speed connection pool
     app.state.client = httpx.AsyncClient(
         http2=True,
         headers=DEFAULT_HEADERS,
@@ -156,7 +155,6 @@ async def lifespan(app: FastAPI):
         follow_redirects=True
     )
     logger.info("Shared HTTP/2 httpx connection pool initialized.")
-    # Pre-fetch bearer token on startup
     await _get_bearer_token()
     try:
         yield
@@ -171,7 +169,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ContextVar to store client IP per request context
 client_ip_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("client_ip", default=None)
 
 
@@ -192,7 +189,6 @@ async def performance_and_ip_middleware(request: Request, call_next):
     process_time = (time.perf_counter() - start_time) * 1000
     response.headers["X-Process-Time"] = f"{process_time:.2f}ms"
     
-    # Add Edge Cache headers for successful GET data requests
     if request.method == "GET" and response.status_code == 200 and request.url.path not in ("/", "/health", "/docs", "/openapi.json"):
         if not response.headers.get("Cache-Control"):
             response.headers["Cache-Control"] = "public, max-age=60, s-maxage=300, stale-while-revalidate=600"
@@ -245,9 +241,9 @@ def _resolve_spoofed_ip(params: dict | None = None, json_body: dict | None = Non
         host = json_body["host"]
 
     if host == "moviebox.com.bd":
-        return "103.191.240.1"  # Real public BD IP (AmberIT)
+        return "103.191.240.1"
     elif host == "moviebox.ph":
-        return "112.198.115.36"  # Real public PH IP (Globe Telecom)
+        return "112.198.115.36"
 
     ip = client_ip_var.get()
 
@@ -404,281 +400,758 @@ async def dashboard(request: Request):
                 "/search?q=",
                 "/search/suggest?q=",
                 "/details/{slug_or_id}",
-                "/download/{slug_or_id}",
+                "/download/{slug_or_id}?se=1&ep=1",
                 "/api/stream/{subject_id}?detail_path=",
                 "/api/stream/{subject_id}/captions?detail_path=",
                 "/recommend/{slug_or_id}"
             ],
-            "message": "High-Performance Pure REST API for moviebox.ph 🚀"
+            "message": "High-Performance Pure REST API for moviebox.ph"
         })
 
-    html_content = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>MovieBox API Pro | High-Performance REST Gateway</title>
-        <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
-        <style>
-            :root {
-                --primary: #ff3d71;
-                --secondary: #3366ff;
-                --accent: #00f2ff;
-                --bg: #07080c;
-                --card-bg: rgba(255, 255, 255, 0.03);
-                --glass: rgba(255, 255, 255, 0.06);
-                --text: #ffffff;
-            }
-
-            * { margin: 0; padding: 0; box-sizing: border-box; }
+    html_content = """<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MovieBox API Pro &bull; Next-Gen Streaming REST Gateway</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-base: #06070a;
+            --bg-surface: rgba(13, 16, 23, 0.7);
+            --bg-surface-hover: rgba(22, 27, 39, 0.85);
+            --border: rgba(255, 255, 255, 0.08);
+            --border-hover: rgba(99, 102, 241, 0.4);
             
-            body {
-                font-family: 'Outfit', sans-serif;
-                background: var(--bg);
-                color: var(--text);
-                overflow-x: hidden;
-                min-height: 100vh;
-                background-image: 
-                    radial-gradient(circle at 10% 10%, rgba(255, 61, 113, 0.12) 0%, transparent 40%),
-                    radial-gradient(circle at 90% 90%, rgba(51, 102, 255, 0.12) 0%, transparent 40%);
-            }
+            --primary: #6366f1;
+            --primary-glow: rgba(99, 102, 241, 0.25);
+            --accent-cyan: #06b6d4;
+            --accent-pink: #ec4899;
+            --accent-emerald: #10b981;
+            
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --text-dim: #64748b;
+        }
 
-            .container {
-                max-width: 1200px;
-                margin: 0 auto;
-                padding: 60px 24px;
-                position: relative;
-            }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
 
-            header {
-                text-align: center;
-                margin-bottom: 80px;
-                animation: fadeInDown 1s ease-out;
-            }
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            min-height: 100vh;
+            overflow-x: hidden;
+            background-image: 
+                radial-gradient(ellipse 80% 50% at 50% -20%, rgba(99, 102, 241, 0.15), transparent),
+                radial-gradient(circle at 90% 80%, rgba(6, 182, 212, 0.08), transparent 40%),
+                radial-gradient(circle at 10% 90%, rgba(236, 72, 153, 0.08), transparent 40%);
+            background-attachment: fixed;
+        }
 
-            @keyframes fadeInDown {
-                from { opacity: 0; transform: translateY(-30px); }
-                to { opacity: 1; transform: translateY(0); }
-            }
+        .ambient-grid {
+            position: fixed;
+            inset: 0;
+            background-image: linear-gradient(to right, rgba(255,255,255,0.02) 1px, transparent 1px),
+                              linear-gradient(to bottom, rgba(255,255,255,0.02) 1px, transparent 1px);
+            background-size: 40px 40px;
+            pointer-events: none;
+            z-index: 0;
+        }
 
-            h1 {
-                font-size: clamp(2.5rem, 8vw, 4rem);
-                font-weight: 800;
-                background: linear-gradient(135deg, #fff 0%, #aaa 100%);
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
-                margin-bottom: 15px;
-                letter-spacing: -2px;
-            }
+        .container {
+            max-width: 1280px;
+            margin: 0 auto;
+            padding: 50px 24px 80px;
+            position: relative;
+            z-index: 1;
+        }
 
-            .badge {
-                background: linear-gradient(90deg, var(--primary), var(--secondary));
-                padding: 8px 18px;
-                border-radius: 40px;
-                font-size: 0.85rem;
-                font-weight: 700;
-                display: inline-block;
-                margin-bottom: 25px;
-                text-transform: uppercase;
-                letter-spacing: 1px;
-                box-shadow: 0 10px 30px rgba(255, 61, 113, 0.3);
-            }
+        /* Top Nav */
+        .navbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 24px;
+            background: rgba(13, 16, 23, 0.6);
+            backdrop-filter: blur(16px);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            margin-bottom: 50px;
+        }
 
-            .grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-                gap: 30px;
-                margin-top: 20px;
-            }
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            text-decoration: none;
+            color: var(--text-main);
+        }
 
-            .card {
-                background: var(--card-bg);
-                border: 1px solid var(--glass);
-                border-radius: 28px;
-                padding: 35px;
-                transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-                backdrop-filter: blur(12px);
-                position: relative;
-                overflow: hidden;
-                display: flex;
-                flex-direction: column;
-            }
+        .brand-icon {
+            width: 38px;
+            height: 38px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, var(--primary), var(--accent-pink));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 0 20px var(--primary-glow);
+        }
 
-            @media (hover: hover) {
-                .card:hover {
-                    transform: translateY(-12px) scale(1.02);
-                    border-color: rgba(255,255,255,0.2);
-                    box-shadow: 0 30px 60px rgba(0,0,0,0.5);
-                }
-            }
+        .brand-name {
+            font-size: 1.25rem;
+            font-weight: 800;
+            letter-spacing: -0.5px;
+        }
 
-            .card-title {
-                font-size: 1.5rem;
-                font-weight: 700;
-                margin-bottom: 18px;
-                display: flex;
-                align-items: center;
-                gap: 12px;
-            }
+        .brand-tag {
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            font-weight: 700;
+            background: rgba(99, 102, 241, 0.15);
+            color: #818cf8;
+            padding: 3px 8px;
+            border-radius: 6px;
+            border: 1px solid rgba(99, 102, 241, 0.3);
+        }
 
-            .card-title i {
-                width: 32px; height: 32px;
-                background: rgba(255,255,255,0.05);
-                border-radius: 8px;
-                display: flex; align-items: center; justify-content: center;
-                font-size: 1rem; color: var(--accent);
-                font-style: normal;
-            }
+        .nav-links {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
 
-            .card-desc {
-                color: #9ea3ac;
-                font-size: 1rem;
-                line-height: 1.6;
-                margin-bottom: 25px;
-                flex-grow: 1;
-            }
+        .nav-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-decoration: none;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            transition: all 0.2s ease;
+        }
 
-            .endpoint {
-                font-family: 'JetBrains Mono', monospace;
-                background: rgba(0,0,0,0.4);
-                padding: 14px;
-                border-radius: 14px;
-                font-size: 0.85rem;
-                color: var(--accent);
-                border: 1px solid rgba(0,242,255,0.15);
-                margin-bottom: 25px;
-                word-break: break-all;
-                position: relative;
-            }
+        .nav-btn:hover {
+            color: #fff;
+            border-color: rgba(255, 255, 255, 0.2);
+            background: rgba(255, 255, 255, 0.06);
+            transform: translateY(-1px);
+        }
 
-            .endpoint::after {
-                content: 'GET';
-                position: absolute;
-                right: 14px; top: 14px;
-                font-size: 0.65rem; font-weight: 800;
-                color: rgba(255,255,255,0.3);
-            }
+        /* Hero */
+        .hero {
+            text-align: center;
+            margin-bottom: 50px;
+        }
 
-            .btn {
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                padding: 16px;
-                background: #ffffff;
-                color: #000000;
-                text-decoration: none;
-                border-radius: 16px;
-                font-weight: 700;
-                font-size: 0.95rem;
-                transition: all 0.3s;
-            }
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 16px;
+            border-radius: 30px;
+            background: rgba(16, 185, 129, 0.08);
+            border: 1px solid rgba(16, 185, 129, 0.25);
+            color: var(--accent-emerald);
+            font-size: 0.8rem;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            margin-bottom: 20px;
+        }
 
-            .btn:hover {
-                background: var(--primary);
-                color: #fff;
-                transform: translateY(-2px);
-                box-shadow: 0 10px 25px rgba(255, 61, 113, 0.4);
-            }
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--accent-emerald);
+            box-shadow: 0 0 10px var(--accent-emerald);
+            animation: pulseDot 2s infinite ease-in-out;
+        }
 
-            footer {
-                text-align: center;
-                padding: 80px 0 40px;
-                animation: fadeIn 2s ease;
-            }
+        @keyframes pulseDot {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.4; transform: scale(0.85); }
+        }
 
-            @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        .hero h1 {
+            font-size: clamp(2.5rem, 6vw, 4.2rem);
+            font-weight: 800;
+            letter-spacing: -1.5px;
+            line-height: 1.1;
+            margin-bottom: 18px;
+            background: linear-gradient(180deg, #ffffff 30%, #94a3b8 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
 
-            .dev-tag {
-                font-weight: 800;
-                color: #666;
-                letter-spacing: 3px;
-                text-transform: uppercase;
-                font-size: 0.75rem;
-                border: 1px solid #222;
-                padding: 12px 30px;
-                border-radius: 50px;
-                display: inline-block;
-                background: rgba(255,255,255,0.01);
-                transition: all 0.3s;
-            }
+        .hero p {
+            color: var(--text-muted);
+            font-size: 1.15rem;
+            max-width: 680px;
+            margin: 0 auto 35px;
+            line-height: 1.6;
+        }
 
-            .dev-tag:hover {
-                color: var(--text);
-                border-color: var(--primary);
-                letter-spacing: 5px;
-            }
+        /* Live Interactive Tester Bar */
+        .tester-box {
+            max-width: 760px;
+            margin: 0 auto 60px;
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 8px;
+            display: flex;
+            gap: 8px;
+            backdrop-filter: blur(12px);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.4);
+            transition: border-color 0.3s;
+        }
 
-            @media (max-width: 480px) {
-                .container { padding: 40px 16px; }
-                .card { padding: 25px; }
-                h1 { margin-bottom: 10px; }
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <header>
-                <div class="badge">Ultra-Fast Edition &bull; HTTP/2 &bull; Rust JSON</div>
-                <h1>MovieBox Pro</h1>
-                <p style="color: #889; font-size: 1.25rem; font-weight: 300;">State-of-the-Art Pure REST Architecture</p>
-                <div style="margin-top: 15px;">
-                    <a href="/docs" target="_blank" style="color: var(--accent); text-decoration: none; font-size: 0.95rem; font-weight: 600; margin-right: 20px;">Swagger Docs &rarr;</a>
-                    <a href="/redoc" target="_blank" style="color: var(--primary); text-decoration: none; font-size: 0.95rem; font-weight: 600;">ReDoc &rarr;</a>
+        .tester-box:focus-within {
+            border-color: var(--primary);
+            box-shadow: 0 0 30px var(--primary-glow);
+        }
+
+        .tester-input {
+            flex-grow: 1;
+            background: transparent;
+            border: none;
+            outline: none;
+            padding: 12px 18px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.95rem;
+            color: #fff;
+        }
+
+        .tester-input::placeholder {
+            color: var(--text-dim);
+        }
+
+        .tester-btn {
+            background: linear-gradient(135deg, var(--primary), #4f46e5);
+            color: #fff;
+            border: none;
+            border-radius: 14px;
+            padding: 12px 24px;
+            font-weight: 700;
+            font-size: 0.9rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.2s;
+        }
+
+        .tester-btn:hover {
+            opacity: 0.92;
+            transform: translateY(-1px);
+            box-shadow: 0 10px 20px var(--primary-glow);
+        }
+
+        /* Bento Grid */
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+            gap: 24px;
+        }
+
+        .card {
+            background: var(--bg-surface);
+            border: 1px solid var(--border);
+            border-radius: 24px;
+            padding: 30px;
+            display: flex;
+            flex-direction: column;
+            backdrop-filter: blur(14px);
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; height: 2px;
+            background: linear-gradient(90deg, transparent, var(--primary), transparent);
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .card:hover {
+            background: var(--bg-surface-hover);
+            border-color: var(--border-hover);
+            transform: translateY(-4px);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+        }
+
+        .card:hover::before {
+            opacity: 1;
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+        }
+
+        .card-icon-wrapper {
+            width: 44px;
+            height: 44px;
+            border-radius: 14px;
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--accent-cyan);
+            transition: all 0.3s;
+        }
+
+        .card:hover .card-icon-wrapper {
+            background: rgba(99, 102, 241, 0.15);
+            border-color: rgba(99, 102, 241, 0.3);
+            color: #fff;
+            transform: scale(1.05);
+        }
+
+        .method-tag {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.7rem;
+            font-weight: 700;
+            padding: 4px 10px;
+            border-radius: 8px;
+            background: rgba(6, 182, 212, 0.1);
+            color: var(--accent-cyan);
+            border: 1px solid rgba(6, 182, 212, 0.2);
+            text-transform: uppercase;
+        }
+
+        .card-title {
+            font-size: 1.25rem;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+            margin-bottom: 10px;
+        }
+
+        .card-desc {
+            color: var(--text-muted);
+            font-size: 0.92rem;
+            line-height: 1.6;
+            margin-bottom: 22px;
+            flex-grow: 1;
+        }
+
+        .endpoint-pill {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.82rem;
+            background: rgba(0, 0, 0, 0.45);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            padding: 12px 14px;
+            border-radius: 12px;
+            color: #cbd5e1;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 18px;
+            word-break: break-all;
+        }
+
+        .card-actions {
+            display: flex;
+            gap: 10px;
+        }
+
+        .action-btn {
+            flex: 1;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 12px;
+            border-radius: 12px;
+            font-size: 0.88rem;
+            font-weight: 700;
+            text-decoration: none;
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+
+        .btn-launch {
+            background: #ffffff;
+            color: #000000;
+        }
+
+        .btn-launch:hover {
+            background: var(--primary);
+            color: #ffffff;
+            box-shadow: 0 8px 20px var(--primary-glow);
+        }
+
+        .btn-copy {
+            background: rgba(255, 255, 255, 0.04);
+            color: var(--text-muted);
+            border: 1px solid var(--border);
+            max-width: 48px;
+            padding: 12px;
+        }
+
+        .btn-copy:hover {
+            background: rgba(255, 255, 255, 0.08);
+            color: #fff;
+            border-color: rgba(255, 255, 255, 0.2);
+        }
+
+        footer {
+            margin-top: 80px;
+            text-align: center;
+            padding-top: 40px;
+            border-top: 1px solid var(--border);
+            color: var(--text-dim);
+            font-size: 0.85rem;
+        }
+
+        .footer-tech {
+            display: flex;
+            justify-content: center;
+            gap: 16px;
+            margin-top: 12px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        /* Toast notification */
+        .toast {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            background: #1e293b;
+            color: #fff;
+            padding: 12px 20px;
+            border-radius: 12px;
+            border: 1px solid rgba(99, 102, 241, 0.4);
+            font-size: 0.88rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            transform: translateY(100px);
+            opacity: 0;
+            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+            z-index: 100;
+        }
+
+        .toast.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
+
+        @media (max-width: 768px) {
+            .container { padding: 30px 16px; }
+            .grid { grid-template-columns: 1fr; }
+            .navbar { flex-direction: column; gap: 16px; }
+            .tester-box { flex-direction: column; }
+        }
+    </style>
+</head>
+<body>
+    <div class="ambient-grid"></div>
+
+    <div class="container">
+        <!-- Top Navigation -->
+        <nav class="navbar">
+            <a href="/" class="brand">
+                <div class="brand-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                    </svg>
                 </div>
-            </header>
-
-            <div class="grid">
-                <div class="card">
-                    <div class="card-title"><i>🏠</i> Discover Home</div>
-                    <p class="card-desc">The ultimate window into MovieBox. Headlines, recommended content, and trending blocks updated in real-time.</p>
-                    <div class="endpoint">/home</div>
-                    <a href="/home" target="_blank" class="btn">Launch API</a>
+                <div>
+                    <span class="brand-name">MovieBox API</span>
                 </div>
+                <span class="brand-tag">v2.2 Pro</span>
+            </a>
 
-                <div class="card">
-                    <div class="card-title"><i>🔍</i> Smart Search</div>
-                    <p class="card-desc">High-precision search engine results. Returns titles, posters, and slugs for lightning-fast matching.</p>
-                    <div class="endpoint">/search?q=Attack on Titan</div>
-                    <a href="/search?q=Attack on Titan" target="_blank" class="btn">Test Search</a>
+            <div class="nav-links">
+                <a href="/docs" target="_blank" class="nav-btn">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                        <polyline points="14 2 14 8 20 8"></polyline>
+                        <line x1="16" y1="13" x2="8" y2="13"></line>
+                        <line x1="16" y1="17" x2="8" y2="17"></line>
+                        <polyline points="10 9 9 9 8 9"></polyline>
+                    </svg>
+                    Swagger UI
+                </a>
+                <a href="/redoc" target="_blank" class="nav-btn">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+                    </svg>
+                    ReDoc
+                </a>
+                <a href="/health" target="_blank" class="nav-btn">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-emerald)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M22 12h-4l-3 9L9 3l-3 9H2"></path>
+                    </svg>
+                    Health
+                </a>
+            </div>
+        </nav>
+
+        <!-- Hero Section -->
+        <header class="hero">
+            <div class="status-pill">
+                <div class="status-dot"></div>
+                REST ENGINE ACTIVE &bull; HTTP/2 MULTIPLEXED
+            </div>
+            <h1>Ultra-Fast MovieBox<br>Streaming Gateway</h1>
+            <p>Direct MP4 stream extractor, subtitle aggregator, real-time search engine, and metadata provider with zero web scraping.</p>
+
+            <!-- Quick Live Tester -->
+            <form class="tester-box" onsubmit="handleQuickTest(event)">
+                <input id="quickInput" type="text" class="tester-input" placeholder="Search title or enter slug (e.g. Attack on Titan, Bloodhounds)..." value="Attack on Titan">
+                <button type="submit" class="tester-btn">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                    Test Search
+                </button>
+            </form>
+        </header>
+
+        <!-- Bento Grid Cards -->
+        <div class="grid">
+            <!-- 1. Universal Stream & Download Engine -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon-wrapper">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                            <polyline points="7 10 12 15 17 10"></polyline>
+                            <line x1="12" y1="15" x2="12" y2="3"></line>
+                        </svg>
+                    </div>
+                    <span class="method-tag">GET</span>
                 </div>
-
-                <div class="card">
-                    <div class="card-title"><i>💡</i> Search Autocomplete</div>
-                    <p class="card-desc">Instant keyword suggestions as you type for search boxes and live autocomplete fields.</p>
-                    <div class="endpoint">/search/suggest?q=batman</div>
-                    <a href="/search/suggest?q=batman" target="_blank" class="btn">Test Suggestions</a>
+                <h3 class="card-title">Unified Stream & Downloads</h3>
+                <p class="card-desc">All direct MP4 streaming resolutions (360p - 1080p), file sizes in MB, and complete multi-language subtitles in one single call.</p>
+                <div class="endpoint-pill">
+                    <span>/download/{slug}?se=1&ep=1</span>
                 </div>
-
-                <div class="card">
-                    <div class="card-title"><i>🆔</i> Metadata A-Z</div>
-                    <p class="card-desc">Deep-dive into any subject. Episodes, seasons, languages, and full high-resolution metadata trees.</p>
-                    <div class="endpoint">/details/{slug_or_id}</div>
-                    <a href="/details/attack-on-titan-hindi-kGWQOIx0d4" target="_blank" class="btn">Fetch Specs</a>
-                </div>
-
-                <div class="card">
-                    <div class="card-title"><i>🎬</i> Unified Download & Streams</div>
-                    <p class="card-desc">All stream qualities + subtitles resolved in a single call. Works with both movies and multi-season TV shows.</p>
-                    <div class="endpoint">/download/{slug}?se=1&ep=1</div>
-                    <a href="/download/attack-on-titan-hindi-kGWQOIx0d4?se=1&ep=1" target="_blank" class="btn">Get Streams & Subs</a>
-                </div>
-
-                <div class="card">
-                    <div class="card-title"><i>📦</i> Catalog Filters</div>
-                    <p class="card-desc">Paginated collections for all genres. Movies, TV shows, and Animations filtered by professional criteria.</p>
-                    <div class="endpoint">/tv-series?page=1</div>
-                    <a href="/tv-series?page=1" target="_blank" class="btn">Browse TV Series</a>
+                <div class="card-actions">
+                    <a href="/download/5543197340762262336?se=1&ep=1" target="_blank" class="action-btn btn-launch">Execute Query</a>
+                    <button onclick="copyToClipboard('/download/5543197340762262336?se=1&ep=1')" class="action-btn btn-copy" title="Copy endpoint">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
+                    </button>
                 </div>
             </div>
 
-            <footer>
-                <div class="dev-tag">MovieBox Unofficial v2 API</div>
-            </footer>
+            <!-- 2. High-Precision Search -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon-wrapper">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                    </div>
+                    <span class="method-tag">GET</span>
+                </div>
+                <h3 class="card-title">Neural Search Engine</h3>
+                <p class="card-desc">Instant indexing for full titles, posters, ratings, subject IDs, and detail slugs with automated guest Bearer JWT authorization.</p>
+                <div class="endpoint-pill">
+                    <span>/search?q=Avengers</span>
+                </div>
+                <div class="card-actions">
+                    <a href="/search?q=Avengers" target="_blank" class="action-btn btn-launch">Execute Query</a>
+                    <button onclick="copyToClipboard('/search?q=Avengers')" class="action-btn btn-copy" title="Copy endpoint">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- 3. Search Autocomplete -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon-wrapper">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="18" y1="6" x2="6" y2="18"></line>
+                            <line x1="6" y1="6" x2="18" y2="18"></line>
+                            <circle cx="12" cy="12" r="9"></circle>
+                        </svg>
+                    </div>
+                    <span class="method-tag">GET</span>
+                </div>
+                <h3 class="card-title">Live Autocomplete Suggestions</h3>
+                <p class="card-desc">Sub-millisecond query completions ideal for search bars, auto-fill inputs, and client-side drop-down preview widgets.</p>
+                <div class="endpoint-pill">
+                    <span>/search/suggest?q=batman</span>
+                </div>
+                <div class="card-actions">
+                    <a href="/search/suggest?q=batman" target="_blank" class="action-btn btn-launch">Execute Query</a>
+                    <button onclick="copyToClipboard('/search/suggest?q=batman')" class="action-btn btn-copy" title="Copy endpoint">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- 4. Discover Home Feed -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon-wrapper">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                            <polyline points="9 22 9 12 15 12 15 22"></polyline>
+                        </svg>
+                    </div>
+                    <span class="method-tag">GET</span>
+                </div>
+                <h3 class="card-title">Discover Home Feed</h3>
+                <p class="card-desc">Real-time curated homepage blocks containing featured hero banners, top trending movies, serialized TV, and anime.</p>
+                <div class="endpoint-pill">
+                    <span>/home</span>
+                </div>
+                <div class="card-actions">
+                    <a href="/home" target="_blank" class="action-btn btn-launch">Execute Query</a>
+                    <button onclick="copyToClipboard('/home')" class="action-btn btn-copy" title="Copy endpoint">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- 5. Metadata Details & Tree -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon-wrapper">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                            <line x1="3" y1="9" x2="21" y2="9"></line>
+                            <line x1="9" y1="21" x2="9" y2="9"></line>
+                        </svg>
+                    </div>
+                    <span class="method-tag">GET</span>
+                </div>
+                <h3 class="card-title">Metadata & Season Tree</h3>
+                <p class="card-desc">Comprehensive item specs, episode lists, multi-language dub trees, actors, synopsis, and HD posters.</p>
+                <div class="endpoint-pill">
+                    <span>/details/{slug_or_id}</span>
+                </div>
+                <div class="card-actions">
+                    <a href="/details/attack-on-titan-hindi-kGWQOIx0d4" target="_blank" class="action-btn btn-launch">Execute Query</a>
+                    <button onclick="copyToClipboard('/details/attack-on-titan-hindi-kGWQOIx0d4')" class="action-btn btn-copy" title="Copy endpoint">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- 6. Category Catalog Filters -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon-wrapper">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon>
+                        </svg>
+                    </div>
+                    <span class="method-tag">GET</span>
+                </div>
+                <h3 class="card-title">Catalog Taxonomy Filters</h3>
+                <p class="card-desc">Paginated library collections filtered by genre, release year, country, and language for Movies, Series, and Anime.</p>
+                <div class="endpoint-pill">
+                    <span>/tv-series?page=1</span>
+                </div>
+                <div class="card-actions">
+                    <a href="/tv-series?page=1" target="_blank" class="action-btn btn-launch">Execute Query</a>
+                    <button onclick="copyToClipboard('/tv-series?page=1')" class="action-btn btn-copy" title="Copy endpoint">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
         </div>
-    </body>
-    </html>
-    """
+
+        <footer>
+            <div>MovieBox Unofficial Pure REST Gateway &bull; Designed for High-Load Production</div>
+            <div class="footer-tech">
+                <span>FastAPI 0.110+</span>
+                <span>&bull;</span>
+                <span>HTTP/2 Multiplexing</span>
+                <span>&bull;</span>
+                <span>Gzip Compressed</span>
+                <span>&bull;</span>
+                <span>Zero Scraping</span>
+            </div>
+        </footer>
+    </div>
+
+    <div id="toast" class="toast">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent-emerald)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12"></polyline>
+        </svg>
+        <span id="toastMsg">Endpoint copied to clipboard</span>
+    </div>
+
+    <script>
+        function copyToClipboard(text) {
+            const fullUrl = window.location.origin + text;
+            navigator.clipboard.writeText(fullUrl).then(() => {
+                showToast('Endpoint URL copied to clipboard!');
+            }).catch(() => {
+                showToast('Copied: ' + text);
+            });
+        }
+
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            document.getElementById('toastMsg').innerText = msg;
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 2500);
+        }
+
+        function handleQuickTest(e) {
+            e.preventDefault();
+            const val = document.getElementById('quickInput').value.trim();
+            if (!val) return;
+            if (val.startsWith('/')) {
+                window.open(val, '_blank');
+            } else {
+                window.open('/search?q=' + encodeURIComponent(val), '_blank');
+            }
+        }
+    </script>
+</body>
+</html>
+"""
     return HTMLResponse(content=html_content)
 
 
@@ -984,64 +1457,22 @@ async def get_details(detail_path: str):
         raise HTTPException(status_code=502, detail=str(e))
 
 
-def _shape_download(detail_path, subject, dl_data):
-    downloads = (dl_data or {}).get("downloads", []) or []
-    captions = (dl_data or {}).get("captions", []) or []
-
-    def _ext(url: str) -> str:
-        path = (url or "").split("?")[0]
-        return path.rsplit(".", 1)[-1] if "." in path else ""
-
-    files = [
-        {
-            "resolution": f"{m.get('resolution')}p",
-            "resolution_value": m.get("resolution"),
-            "size_bytes": int(m.get("size", 0) or 0),
-            "size_mb": round(int(m.get("size", 0) or 0) / (1024 * 1024), 2),
-            "ext": _ext(m.get("url", "")),
-            "id": m.get("id", ""),
-            "stream_link": m.get("url", ""),
-        }
-        for m in downloads
-    ]
-    subtitles = [
-        {
-            "language": c.get("lanName") or c.get("lan"),
-            "language_code": c.get("lan"),
-            "size_bytes": int(c.get("size", 0) or 0),
-            "delay": c.get("delay", 0),
-            "url": c.get("url"),
-        }
-        for c in captions
-    ]
-
-    subj = subject or {}
-    cover = subj.get("cover") or {}
-    subject_type = subj.get("subjectType")
-    return {
-        "status": "success",
-        "detail_path": detail_path,
-        "subject_id": subj.get("subjectId"),
-        "title": subj.get("title", "Unknown"),
-        "subject_type": _SUBJECT_TYPE_NAME.get(subject_type, str(subject_type)),
-        "release_date": subj.get("releaseDate", ""),
-        "cover_image": cover.get("url"),
-        "has_resource": (dl_data or {}).get("hasResource", False),
-        "limited": (dl_data or {}).get("limited", False),
-        "qualities_count": len(files),
-        "files": files,
-        "subtitles": subtitles,
-    }
-
-
 @app.get("/download/{detail_path}")
 async def get_download_links(
     detail_path: str,
     season: int = Query(0, ge=0, description="Season number (TV series only)"),
     episode: int = Query(0, ge=0, description="Episode number (TV series only)"),
+    se: int = Query(0, ge=0, description="Alias for season"),
+    ep: int = Query(0, ge=0, description="Alias for episode"),
 ):
-    """All available stream / download links + subtitles in a single request."""
-    cache_key = f"download:{detail_path}:{season}:{episode}"
+    """All available stream / download links + subtitles in a single request.
+    
+    Uses netfilm streaming engine with fallback to subject/download to guarantee direct MP4 streaming links.
+    """
+    season_val = max(season, se)
+    episode_val = max(episode, ep)
+
+    cache_key = f"download:{detail_path}:{season_val}:{episode_val}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return {**cached, "cached": True}
@@ -1050,32 +1481,159 @@ async def get_download_links(
         details_data = await _fetch_details(detail_path)
         subject = (details_data or {}).get("subject") or {}
         subject_id = subject.get("subjectId")
-        detail_path_slug = subject.get("detailPath")
+        detail_path_slug = subject.get("detailPath") or detail_path
 
-        if not subject_id or not detail_path_slug:
+        if not subject_id:
             raise HTTPException(status_code=404, detail="Could not resolve subject details")
 
-        se_val = season if isinstance(season, int) else 0
-        ep_val = episode if isinstance(episode, int) else 0
-
         is_series = subject.get("subjectType") == SubjectType.TV_SERIES.value
-        se = se_val
-        ep = ep_val
-        if is_series and se_val == 0 and ep_val == 0:
-            se = 1
-            ep = 1
+        eff_se = season_val
+        eff_ep = episode_val
+        if is_series and season_val == 0 and episode_val == 0:
+            eff_se = 1
+            eff_ep = 1
 
-        params = {
-            "subjectId": str(subject_id),
-            "detailPath": str(detail_path_slug),
-            "se": se,
-            "ep": ep,
+        # Fetch direct player streams via netfilm engine
+        dom_data = await _api_get("/wefeed-h5api-bff/media-player/get-domain")
+        domain = str(dom_data if isinstance(dom_data, str) else (dom_data.get("data") if isinstance(dom_data, dict) else "https://netfilm.world")).rstrip("/")
+        if not domain.startswith("http"):
+            domain = "https://netfilm.world"
+
+        player_referer = (
+            f"{domain}/spa/videoPlayPage/movies/{detail_path_slug}"
+            f"?id={subject_id}&type=/movie/detail&detailSe={eff_se}&detailEp={eff_ep}&lang=en"
+        )
+        play_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={eff_se}&ep={eff_ep}&detailPath={detail_path_slug}"
+
+        token = await _get_bearer_token()
+        headers = {
+            **PLAYER_HEADERS,
+            "Referer": player_referer,
+            "Authorization": f"Bearer {token}" if token else ""
         }
 
-        dl_data = await _api_get("/wefeed-h5api-bff/subject/download", params)
+        client = getattr(app.state, "client", None)
+        if client is None:
+            async with httpx.AsyncClient(http2=True, timeout=_TIMEOUT, follow_redirects=True) as temp_client:
+                play_resp = await temp_client.get(play_url, headers=headers)
+        else:
+            play_resp = await client.get(play_url, headers=headers)
 
-        result = _shape_download(detail_path, subject, dl_data)
-        result["cached"] = False
+        play_data = play_resp.json().get("data", {}) if play_resp.status_code == 200 else {}
+        streams = play_data.get("streams", [])
+        dash = play_data.get("dash", [])
+        hls = play_data.get("hls", [])
+
+        # If play endpoint has streams, format them as files
+        files = []
+        for s in streams:
+            url = s.get("url") or ""
+            res_val = s.get("resolutions")
+            size_b = int(s.get("size", 0) or 0)
+            res_str = f"{res_val}p" if res_val else "unknown"
+            files.append({
+                "resolution": res_str,
+                "resolution_value": int(res_val) if str(res_val).isdigit() else 0,
+                "size_bytes": size_b,
+                "size_mb": round(size_b / (1024 * 1024), 2),
+                "ext": "mp4",
+                "id": str(s.get("id", "")),
+                "stream_link": url,
+                "codec": s.get("codecName"),
+                "duration": s.get("duration"),
+                "vip_locked": s.get("vipLocked", False)
+            })
+
+        # Fetch captions
+        captions = []
+        stream_id = None
+        stream_format = "MP4"
+        if streams:
+            stream_id = streams[0].get("id")
+            stream_format = streams[0].get("format", "MP4")
+        elif dash:
+            stream_id = dash[0].get("id")
+            stream_format = dash[0].get("format", "DASH")
+
+        if stream_id:
+            try:
+                cap_params = {
+                    "format": stream_format,
+                    "id": str(stream_id),
+                    "subjectId": str(subject_id),
+                    "detailPath": str(detail_path_slug)
+                }
+                cap_data = await _api_get("/wefeed-h5api-bff/subject/caption", params=cap_params)
+                raw_caps = cap_data.get("captions", []) if isinstance(cap_data, dict) else (cap_data if isinstance(cap_data, list) else [])
+                for c in raw_caps or []:
+                    captions.append({
+                        "language": c.get("lanName") or c.get("lan"),
+                        "language_code": c.get("lan"),
+                        "size_bytes": int(c.get("size", 0) or 0),
+                        "delay": c.get("delay", 0),
+                        "url": c.get("url"),
+                    })
+            except Exception as e:
+                logger.warning(f"Failed to fetch captions: {e}")
+
+        # Fallback to subject/download if play returned no files
+        if not files:
+            try:
+                params = {
+                    "subjectId": str(subject_id),
+                    "detailPath": str(detail_path_slug),
+                    "se": eff_se,
+                    "ep": eff_ep,
+                }
+                dl_data = await _api_get("/wefeed-h5api-bff/subject/download", params)
+                downloads = (dl_data or {}).get("downloads", []) or []
+                for m in downloads:
+                    url = m.get("url") or ""
+                    size_b = int(m.get("size", 0) or 0)
+                    files.append({
+                        "resolution": f"{m.get('resolution')}p",
+                        "resolution_value": m.get("resolution"),
+                        "size_bytes": size_b,
+                        "size_mb": round(size_b / (1024 * 1024), 2),
+                        "ext": "mp4",
+                        "id": str(m.get("id", "")),
+                        "stream_link": url,
+                    })
+                if not captions:
+                    for c in (dl_data or {}).get("captions", []) or []:
+                        captions.append({
+                            "language": c.get("lanName") or c.get("lan"),
+                            "language_code": c.get("lan"),
+                            "size_bytes": int(c.get("size", 0) or 0),
+                            "delay": c.get("delay", 0),
+                            "url": c.get("url"),
+                        })
+            except Exception:
+                pass
+
+        cover = subject.get("cover") or {}
+        subject_type = subject.get("subjectType")
+        has_res = len([f for f in files if f.get("stream_link")]) > 0 or play_data.get("hasResource", False)
+
+        result = {
+            "status": "success",
+            "detail_path": detail_path,
+            "subject_id": str(subject_id),
+            "title": subject.get("title", "Unknown"),
+            "subject_type": _SUBJECT_TYPE_NAME.get(subject_type, str(subject_type)),
+            "season": eff_se if is_series else None,
+            "episode": eff_ep if is_series else None,
+            "release_date": subject.get("releaseDate", ""),
+            "cover_image": cover.get("url"),
+            "has_resource": has_res,
+            "limited": play_data.get("limited", False),
+            "qualities_count": len(files),
+            "files": files,
+            "subtitles": captions,
+            "hls": hls,
+            "dash": dash,
+            "cached": False
+        }
         _cache_set(cache_key, result, DETAILS_TTL)
         return result
     except HTTPException:
@@ -1090,7 +1648,7 @@ async def get_stream_sources(subject_id: str, detail_path: str = "", se: int = 1
     """Direct stream engine integration via media player domain."""
     try:
         dom_data = await _api_get("/wefeed-h5api-bff/media-player/get-domain")
-        domain = str(dom_data if isinstance(dom_data, str) else dom_data.get("data", "https://netfilm.world")).rstrip("/")
+        domain = str(dom_data if isinstance(dom_data, str) else (dom_data.get("data") if isinstance(dom_data, dict) else "https://netfilm.world")).rstrip("/")
         if not domain.startswith("http"):
             domain = "https://netfilm.world"
 
@@ -1152,7 +1710,7 @@ async def get_captions(subject_id: str, detail_path: str = "", se: int = 1, ep: 
     """Fetch captions for a stream subject."""
     try:
         dom_data = await _api_get("/wefeed-h5api-bff/media-player/get-domain")
-        domain = str(dom_data if isinstance(dom_data, str) else dom_data.get("data", "https://netfilm.world")).rstrip("/")
+        domain = str(dom_data if isinstance(dom_data, str) else (dom_data.get("data") if isinstance(dom_data, dict) else "https://netfilm.world")).rstrip("/")
         if not domain.startswith("http"):
             domain = "https://netfilm.world"
 
@@ -1192,11 +1750,13 @@ async def get_captions(subject_id: str, detail_path: str = "", se: int = 1, ep: 
         if not stream_id:
             return {"status": "success", "subject_id": subject_id, "se": se, "ep": ep, "count": 0, "captions": []}
 
-        cap_url = (
-            f"/wefeed-h5api-bff/subject/caption"
-            f"?format={stream_format}&id={stream_id}&subjectId={subject_id}&detailPath={detail_path}"
-        )
-        data = await _api_get(cap_url)
+        cap_params = {
+            "format": stream_format,
+            "id": str(stream_id),
+            "subjectId": str(subject_id),
+            "detailPath": str(detail_path)
+        }
+        data = await _api_get("/wefeed-h5api-bff/subject/caption", params=cap_params)
         captions = data.get("captions", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
         return {"status": "success", "subject_id": subject_id, "se": se, "ep": ep, "count": len(captions), "captions": captions}
     except Exception as e:
