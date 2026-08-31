@@ -776,9 +776,9 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/home")
-async def get_home():
-    """Formatted home feed with banners, movies, series, and animations."""
+@app.get("/api/moviebox/home")
+async def get_legacy_moviebox_home():
+    """Legacy MovieBox formatted home feed with banners, movies, series, and animations."""
     cache_key = "home:formatted"
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -816,18 +816,18 @@ async def get_home():
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error fetching home: {e}")
+        logger.error(f"Error fetching legacy home: {e}")
         raise HTTPException(status_code=502, detail=str(e))
 
 
-@app.get("/homepage")
-async def get_homepage(
+@app.get("/api/moviebox/raw-home")
+async def get_legacy_moviebox_raw_home(
     host: str = Query(
         "moviebox.com.bd",
         description="MovieBox content host/region (e.g. moviebox.com.bd, moviebox.ph)",
     ),
 ):
-    """Raw landing-page content listings (cached 5 min)."""
+    """Raw MovieBox landing-page content listings (cached 5 min)."""
     cache_key = f"homepage:{host}"
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -839,7 +839,7 @@ async def get_homepage(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error fetching homepage: {e}")
+        logger.error(f"Error fetching raw home: {e}")
         raise HTTPException(status_code=502, detail=str(e))
 
 
@@ -1737,6 +1737,7 @@ def _format_tmdb_card(item: dict, default_type: str = "movie") -> dict:
     }
 
 
+@app.get("/home")
 @app.get("/api/home")
 @app.get("/homepage")
 @app.get("/tmdb/home")
