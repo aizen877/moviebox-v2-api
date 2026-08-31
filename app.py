@@ -1917,12 +1917,14 @@ async def _resolve_moviebox_dubs(title: str, tmdb_id: int | None = None, is_seri
     if not clean:
         return []
 
-    cache_key = f"tmdb_dubs:{tmdb_id or clean}"
+    media_type_key = "tv" if is_series else "movie"
+    cache_key = f"tmdb_dubs:{media_type_key}:{tmdb_id or clean}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
     dubs = []
+    seen_dp = set()
     try:
         res = await _api_post(
             "/wefeed-h5api-bff/subject/search",
@@ -1933,7 +1935,7 @@ async def _resolve_moviebox_dubs(title: str, tmdb_id: int | None = None, is_seri
         
         # Match candidates with title relevance and matching media type
         clean_words = set(re.findall(r"\w+", clean.lower()))
-        best_item = None
+        matching_items = []
 
         for it in items:
             sub = it.get("subject", it)
@@ -1947,22 +1949,24 @@ async def _resolve_moviebox_dubs(title: str, tmdb_id: int | None = None, is_seri
             # Title relevance check: must share words with the title
             it_words = set(re.findall(r"\w+", it_title))
             if clean_words & it_words:
-                best_item = sub
-                break
+                matching_items.append(sub)
 
-        if not best_item and items:
+        if not matching_items and items:
             for it in items:
                 sub = it.get("subject", it)
                 dp = str(sub.get("detailPath") or "").lower()
                 if any(w in dp for w in clean_words if len(w) > 2):
-                    best_item = sub
-                    break
+                    matching_items.append(sub)
 
-        if best_item:
-            top_dp = best_item.get("detailPath")
+        for match in matching_items[:3]:
+            top_dp = match.get("detailPath")
             if top_dp:
                 d_data = await _fetch_details(top_dp)
-                dubs = _shape_dubs(d_data)
+                for d in _shape_dubs(d_data):
+                    lan_val = d.get("language_name") or d.get("language_code")
+                    if lan_val and lan_val not in seen_dp:
+                        seen_dp.add(lan_val)
+                        dubs.append(d)
     except Exception as e:
         logger.warning(f"Error fetching dubs for '{title}': {e}")
 
@@ -2102,13 +2106,13 @@ async def get_tmdb_direct_details(
                 })
         first_season_num = seasons[0]["season_number"] if seasons else 1
         eps_task = _fetch_tmdb_season_episodes(tmdb_id=tmdb_id, season_number=first_season_num)
-        dubs_task = _resolve_moviebox_dubs(title, tmdb_id)
+        dubs_task = _resolve_moviebox_dubs(title, tmdb_id, is_series=True)
         ep_res, dub_res = await asyncio.gather(eps_task, dubs_task, return_exceptions=True)
         episodes = ep_res if isinstance(ep_res, list) else []
         dubs = dub_res if isinstance(dub_res, list) else []
     else:
         try:
-            dubs = await _resolve_moviebox_dubs(title, tmdb_id)
+            dubs = await _resolve_moviebox_dubs(title, tmdb_id, is_series=False)
         except Exception:
             dubs = []
 
