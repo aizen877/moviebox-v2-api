@@ -1027,6 +1027,30 @@ def _shape_dubs(details_data: dict) -> list[dict]:
 TMDB_API_KEY = os.getenv("TMDB_API_KEY", "3356865d41894a2fa9bfa84b2b5f59bb")
 
 
+def _pick_best_logo(raw_logos: list[dict]) -> tuple[str | None, str | None]:
+    """Pick single best English PNG transparent logo from TMDB logos list."""
+    if not raw_logos:
+        return None, None
+
+    # 1. Filter English .png logos
+    en_png_logos = [
+        l for l in raw_logos
+        if l.get("iso_639_1") == "en" and str(l.get("file_path") or "").lower().endswith(".png")
+    ]
+    if en_png_logos:
+        best = en_png_logos[0]
+    else:
+        # 2. Fallback to any .png logo
+        any_png = next((l for l in raw_logos if str(l.get("file_path") or "").lower().endswith(".png")), None)
+        best = any_png if any_png else (raw_logos[0] if raw_logos else None)
+
+    if not best or not best.get("file_path"):
+        return None, None
+
+    fp = best.get("file_path")
+    return f"https://image.tmdb.org/t/p/original{fp}", f"https://image.tmdb.org/t/p/w500{fp}"
+
+
 def _clean_title(title: str) -> str:
     if not title:
         return ""
@@ -1040,7 +1064,7 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
     """Ultra-fast cached TMDB ID, Logo, Backdrop & Poster resolver."""
     cleaned = _clean_title(title)
     if not cleaned:
-        return {"tmdb_id": None, "logo": None, "logo_w500": None, "backdrop": None, "poster": None, "logos": []}
+        return {"tmdb_id": None, "logo": None, "logo_w500": None, "backdrop": None, "poster": None}
 
     media_type_key = "tv" if is_series is True else ("movie" if is_series is False else "multi")
     year_str = str(year)[:4] if year else ""
@@ -1056,7 +1080,6 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
     backdrop_path = None
     logo_url = None
     logo_w500 = None
-    all_logos = []
     resolved_media_type = "tv" if is_series is True else "movie"
 
     # Fast TMDB Search (search multi or specific type)
@@ -1082,7 +1105,7 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
     except Exception:
         pass
 
-    # Fetch title logos from TMDB images if TMDB ID resolved
+    # Fetch title logo from TMDB images if TMDB ID resolved
     if tmdb_id:
         try:
             img_url = f"https://api.themoviedb.org/3/{resolved_media_type}/{tmdb_id}/images?api_key={TMDB_API_KEY}"
@@ -1090,41 +1113,7 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
             if r_img.status_code == 200:
                 img_data = r_img.json()
                 raw_logos = img_data.get("logos", [])
-                for l in raw_logos:
-                    fp = l.get("file_path")
-                    if fp:
-                        full_p = f"https://image.tmdb.org/t/p/original{fp}"
-                        all_logos.append({
-                            "url": full_p,
-                            "url_w500": f"https://image.tmdb.org/t/p/w500{fp}",
-                            "aspect_ratio": l.get("aspect_ratio"),
-                            "width": l.get("width"),
-                            "height": l.get("height"),
-                            "lang": l.get("iso_639_1"),
-                            "vote_average": l.get("vote_average"),
-                            "vote_count": l.get("vote_count"),
-                        })
-                # Smart English-First Logo Selection
-                NON_LATIN_LANGS = {"zh", "ja", "ko", "ar", "ru", "hi", "th", "he", "fa", "el", "ta", "te", "bn"}
-                en_logos = [l for l in all_logos if l.get("lang") == "en"]
-                picked_logo = None
-
-                if en_logos:
-                    best_en = sorted(en_logos, key=lambda x: (x.get("vote_average", 0), x.get("vote_count", 0)), reverse=True)[0]
-                    top_global = all_logos[0]
-                    global_lang = top_global.get("lang")
-                    # If top rated global is in latin script and has significantly higher community votes, use it
-                    if global_lang not in NON_LATIN_LANGS and top_global.get("vote_average", 0) > best_en.get("vote_average", 0) + 1.0:
-                        picked_logo = top_global
-                    else:
-                        picked_logo = best_en
-                elif all_logos:
-                    latin_logos = [l for l in all_logos if l.get("lang") not in NON_LATIN_LANGS]
-                    picked_logo = latin_logos[0] if latin_logos else all_logos[0]
-
-                if picked_logo:
-                    logo_url = picked_logo["url"]
-                    logo_w500 = picked_logo["url_w500"]
+                logo_url, logo_w500 = _pick_best_logo(raw_logos)
         except Exception:
             pass
 
@@ -1134,8 +1123,7 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
         "logo": logo_url,
         "logo_w500": logo_w500,
         "backdrop": f"https://image.tmdb.org/t/p/original{backdrop_path}" if backdrop_path else None,
-        "poster": f"https://image.tmdb.org/t/p/original{poster_path}" if poster_path else None,
-        "logos": all_logos
+        "poster": f"https://image.tmdb.org/t/p/original{poster_path}" if poster_path else None
     }
     _cache_set(cache_key, res, METADATA_TTL)
     return res
@@ -1429,7 +1417,6 @@ async def get_details(detail_path: str):
             "logo_w500": tmdb_info.get("logo_w500"),
             "backdrop": tmdb_info.get("backdrop"),
             "poster": tmdb_info.get("poster"),
-            "logos": tmdb_info.get("logos", []),
             "total_seasons": len(shaped_seasons),
             "total_episodes": sum(s.get("maxEp", 0) for s in shaped_seasons),
             "seasons": shaped_seasons,
@@ -1988,38 +1975,7 @@ async def get_tmdb_direct_details(
 
     # Smart English-First Logo Extraction
     raw_logos = data.get("images", {}).get("logos", [])
-    all_logos = []
-    for l in raw_logos:
-        fp = l.get("file_path")
-        if fp:
-            all_logos.append({
-                "url": f"https://image.tmdb.org/t/p/original{fp}",
-                "url_w500": f"https://image.tmdb.org/t/p/w500{fp}",
-                "aspect_ratio": l.get("aspect_ratio"),
-                "width": l.get("width"),
-                "height": l.get("height"),
-                "lang": l.get("iso_639_1"),
-                "vote_average": l.get("vote_average"),
-                "vote_count": l.get("vote_count"),
-            })
-
-    NON_LATIN_LANGS = {"zh", "ja", "ko", "ar", "ru", "hi", "th", "he", "fa", "el", "ta", "te", "bn"}
-    en_logos = [l for l in all_logos if l.get("lang") == "en"]
-    picked_logo = None
-    if en_logos:
-        best_en = sorted(en_logos, key=lambda x: (x.get("vote_average", 0), x.get("vote_count", 0)), reverse=True)[0]
-        top_global = all_logos[0]
-        global_lang = top_global.get("lang")
-        if global_lang not in NON_LATIN_LANGS and top_global.get("vote_average", 0) > best_en.get("vote_average", 0) + 1.0:
-            picked_logo = top_global
-        else:
-            picked_logo = best_en
-    elif all_logos:
-        latin_logos = [l for l in all_logos if l.get("lang") not in NON_LATIN_LANGS]
-        picked_logo = latin_logos[0] if latin_logos else all_logos[0]
-
-    logo_url = picked_logo["url"] if picked_logo else None
-    logo_w500 = picked_logo["url_w500"] if picked_logo else None
+    logo_url, logo_w500 = _pick_best_logo(raw_logos)
 
     # Extract YouTube Trailer
     trailer_url = None
