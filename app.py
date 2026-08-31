@@ -1067,12 +1067,14 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
         r = await client.get(search_url, timeout=3.5)
         if r.status_code == 200:
             results = r.json().get("results", [])
-            if is_series is not None and endpoint == "multi":
-                filtered = [res for res in results if res.get("media_type") == ("tv" if is_series else "movie")]
-                if filtered:
-                    results = filtered
             if results:
-                top = results[0]
+                if is_series is True:
+                    top = next((res for res in results if res.get("media_type") == "tv"), results[0])
+                elif is_series is False:
+                    top = next((res for res in results if res.get("media_type") == "movie"), results[0])
+                else:
+                    top = results[0]
+
                 tmdb_id = top.get("id")
                 poster_path = top.get("poster_path")
                 backdrop_path = top.get("backdrop_path")
@@ -1459,6 +1461,12 @@ async def get_download_links(
     """
     season_val = max(int(season or 0), int(se or 0))
     episode_val = max(int(episode or 0), int(ep or 0))
+
+    # Fast top-level cache hit (1-2ms)
+    slug_cache_key = f"download:{detail_path}:{season_val}:{episode_val}"
+    cached = _cache_get(slug_cache_key)
+    if cached is not None:
+        return {**cached, "cached": True}
 
     try:
         candidate = _extract_slug_title(detail_path)
