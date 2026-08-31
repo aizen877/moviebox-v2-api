@@ -10,17 +10,26 @@ import asyncio
 import contextvars
 import json
 import logging
+import os
 import re
 import time
 from contextlib import asynccontextmanager
 from enum import Enum
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import httpx
+import orjson
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
+
+
+class FastJSONResponse(Response):
+    media_type = "application/json"
+
+    def render(self, content: any) -> bytes:
+        return orjson.dumps(content, option=orjson.OPT_NON_STR_KEYS)
 
 class SubjectType(int, Enum):
     ALL = 0
@@ -74,9 +83,9 @@ PLAYER_HEADERS = {
     "sec-fetch-site": "same-origin",
 }
 
-# Shared client limits & connection pool
-_LIMITS = httpx.Limits(max_keepalive_connections=30, max_connections=60, keepalive_expiry=30.0)
-_TIMEOUT = httpx.Timeout(20.0, connect=8.0)
+# Shared ultra-high-throughput connection pool
+_LIMITS = httpx.Limits(max_keepalive_connections=100, max_connections=200, keepalive_expiry=60.0)
+_TIMEOUT = httpx.Timeout(15.0, connect=4.0)
 
 # Global bearer token cache & lock
 _bearer_token: str | None = None
@@ -84,10 +93,11 @@ _token_lock = asyncio.Lock()
 
 # Ultra-fast in-memory TTL cache: key -> (expires_at, value)
 _CACHE: dict[str, tuple[float, object]] = {}
-HOMEPAGE_TTL = 300.0   # 5 min
-SEARCH_TTL = 120.0     # 2 min
-DETAILS_TTL = 600.0    # 10 min
-RECOMMEND_TTL = 600.0  # 10 min
+HOMEPAGE_TTL = 300.0    # 5 min
+SEARCH_TTL = 180.0      # 3 min
+DETAILS_TTL = 600.0     # 10 min
+METADATA_TTL = 86400.0  # 24 hours (for TMDB ID, Logo, Backdrop)
+RECOMMEND_TTL = 600.0   # 10 min
 
 
 def _cache_get(key: str):
@@ -165,8 +175,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="MovieBox API Pro",
     description="Full Pure REST API for moviebox.ph — Ultra High Performance",
-    version="2.2.0",
+    version="2.3.0",
     lifespan=lifespan,
+    default_response_class=FastJSONResponse,
 )
 
 client_ip_var: contextvars.ContextVar[str | None] = contextvars.ContextVar("client_ip", default=None)
@@ -1022,6 +1033,161 @@ def _shape_dubs(details_data: dict) -> list[dict]:
     return dubs
 
 
+TMDB_API_KEY = os.getenv("TMDB_API_KEY", "3356865d41894a2fa9bfa84b2b5f59bb")
+
+
+def _clean_title(title: str) -> str:
+    if not title:
+        return ""
+    t = re.sub(r"\[.*?\]|\(.*?\)", "", title)
+    t = re.sub(r":\s*Season\s*\d+", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"Season\s*\d+", "", t, flags=re.IGNORECASE)
+    return t.strip()
+
+
+async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None = None) -> dict:
+    """Ultra-fast cached TMDB ID, Logo, Backdrop & Poster resolver."""
+    cleaned = _clean_title(title)
+    if not cleaned:
+        return {"tmdb_id": None, "logo": None, "logo_w500": None, "backdrop": None, "poster": None, "logos": []}
+
+    media_type_key = "tv" if is_series is True else ("movie" if is_series is False else "multi")
+    year_str = str(year)[:4] if year else ""
+    cache_key = f"tmdb_meta:{media_type_key}:{cleaned}:{year_str}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    client = getattr(app.state, "client", None)
+    should_close = False
+    if client is None:
+        client = httpx.AsyncClient(http2=True, timeout=_TIMEOUT, follow_redirects=True)
+        should_close = True
+
+    tmdb_id = None
+    poster_path = None
+    backdrop_path = None
+    logo_url = None
+    logo_w500 = None
+    all_logos = []
+    resolved_media_type = "tv" if is_series is True else "movie"
+
+    try:
+        # Fast TMDB Search (search multi or specific type)
+        endpoint = "multi" if is_series is None else ("tv" if is_series else "movie")
+        search_url = f"https://api.themoviedb.org/3/search/{endpoint}?api_key={TMDB_API_KEY}&query={quote(cleaned)}"
+        r = await client.get(search_url, timeout=3.5)
+        if r.status_code == 200:
+            results = r.json().get("results", [])
+            if is_series is not None and endpoint == "multi":
+                filtered = [res for res in results if res.get("media_type") == ("tv" if is_series else "movie")]
+                if filtered:
+                    results = filtered
+            if results:
+                top = results[0]
+                tmdb_id = top.get("id")
+                poster_path = top.get("poster_path")
+                backdrop_path = top.get("backdrop_path")
+                if "media_type" in top:
+                    resolved_media_type = top.get("media_type")
+
+        # Fetch title logos from TMDB images if TMDB ID resolved
+        if tmdb_id:
+            try:
+                img_url = f"https://api.themoviedb.org/3/{resolved_media_type}/{tmdb_id}/images?api_key={TMDB_API_KEY}"
+                r_img = await client.get(img_url, timeout=3.5)
+                if r_img.status_code == 200:
+                    img_data = r_img.json()
+                    raw_logos = img_data.get("logos", [])
+                    for l in raw_logos:
+                        fp = l.get("file_path")
+                        if fp:
+                            full_p = f"https://image.tmdb.org/t/p/original{fp}"
+                            all_logos.append({
+                                "url": full_p,
+                                "url_w500": f"https://image.tmdb.org/t/p/w500{fp}",
+                                "aspect_ratio": l.get("aspect_ratio"),
+                                "width": l.get("width"),
+                                "height": l.get("height"),
+                                "lang": l.get("iso_639_1"),
+                                "vote_average": l.get("vote_average"),
+                                "vote_count": l.get("vote_count"),
+                            })
+                    # Prioritize the top-rated official full-color logo (ranked #1 by TMDB)
+                    if all_logos:
+                        logo_url = all_logos[0]["url"]
+                        logo_w500 = all_logos[0]["url_w500"]
+            except Exception:
+                pass
+    finally:
+        if should_close:
+            await client.aclose()
+
+    res = {
+        "tmdb_id": tmdb_id,
+        "media_type": resolved_media_type,
+        "logo": logo_url,
+        "logo_w500": logo_w500,
+        "backdrop": f"https://image.tmdb.org/t/p/original{backdrop_path}" if backdrop_path else None,
+        "poster": f"https://image.tmdb.org/t/p/original{poster_path}" if poster_path else None,
+        "logos": all_logos
+    }
+    _cache_set(cache_key, res, METADATA_TTL)
+    return res
+
+
+async def _fetch_net27_stream_sources(
+    tmdb_id: int,
+    is_series: bool,
+    se: int = 1,
+    ep: int = 1,
+    subject_id: str = "",
+    detail_path: str = "",
+    dubs: list | None = None
+) -> dict | None:
+    """Fetch all high-resolution direct CDN MP4 streams and captions from Net27 engine."""
+    if not tmdb_id:
+        return None
+
+    media_type = "tv" if is_series else "movie"
+    url = f"https://net27.cc/api/embed-tmdb/{tmdb_id}?type={media_type}"
+    if is_series:
+        url += f"&se={se}&ep={ep}"
+    if subject_id:
+        url += f"&sid={subject_id}"
+    if detail_path:
+        url += f"&dp={detail_path}"
+
+    if dubs:
+        warm_parts = []
+        for d in dubs:
+            sid = d.get("subjectId") or d.get("id") or d.get("subject_id")
+            dp = d.get("detailPath") or d.get("detail_path")
+            if sid and dp:
+                warm_parts.append(f"{sid}~{dp}")
+        if warm_parts:
+            url += f"&warm={quote(','.join(warm_parts))}"
+
+    client = getattr(app.state, "client", None)
+    should_close = False
+    if client is None:
+        client = httpx.AsyncClient(http2=True, timeout=_TIMEOUT, follow_redirects=True)
+        should_close = True
+
+    try:
+        resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=4.5)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("ok") and data.get("streams"):
+                return data
+    except Exception as e:
+        logger.warning(f"Net27 stream fetch notice: {e}")
+    finally:
+        if should_close:
+            await client.aclose()
+    return None
+
+
 async def _fetch_details(detail_path: str) -> dict:
     """Fetch + cache raw item details via the shared client."""
     is_numeric = str(detail_path).isdigit()
@@ -1046,25 +1212,68 @@ async def _fetch_details(detail_path: str) -> dict:
     return data
 
 
+def _extract_slug_title(slug: str) -> str:
+    """Fast candidate title extractor from Moviebox URL slug."""
+    if not slug or str(slug).isdigit():
+        return ""
+    parts = slug.split("-")
+    if len(parts) > 1 and len(parts[-1]) >= 8:
+        parts = parts[:-1]
+    filtered = [p for p in parts if p.lower() not in ("english", "hindi", "tamil", "telugu", "spanish", "french", "season", "complete", "dub", "sub", "hd", "4k")]
+    return " ".join(filtered) if filtered else " ".join(parts)
+
+
+async def _background_prefetch_next_ep(detail_path: str, season: int, episode: int):
+    """Fire-and-forget background pre-warm for next episode into cache."""
+    try:
+        await get_download_links(detail_path=detail_path, season=season, episode=episode)
+    except Exception:
+        pass
+
+
 @app.get("/details/{detail_path}")
 @app.get("/detail/{detail_path}")
 async def get_details(detail_path: str):
-    """Specific item details (id = subjectId or detailPath, cached 10 min)."""
+    """Specific item details with TMDB ID & Title Logo (cached 10 min)."""
     cache_key = f"details_resp:{detail_path}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return {**cached, "cached": True}
     try:
-        data = await _fetch_details(detail_path)
+        candidate = _extract_slug_title(detail_path)
+        
+        # Parallel Step: Fetch MovieBox Detail + TMDB Info simultaneously
+        if candidate:
+            task_detail = _fetch_details(detail_path)
+            task_tmdb = _resolve_tmdb_info(candidate)
+            data, tmdb_info = await asyncio.gather(task_detail, task_tmdb)
+        else:
+            data = await _fetch_details(detail_path)
+            subject = (data or {}).get("subject") or {}
+            title = subject.get("title", "")
+            year = subject.get("releaseDate", "")
+            is_series = subject.get("subjectType") == SubjectType.TV_SERIES.value
+            tmdb_info = await _resolve_tmdb_info(title, year, is_series)
+
         result = {
             "status": "success",
             "cached": False,
             "detail_path": detail_path,
+            "tmdb_id": tmdb_info.get("tmdb_id"),
+            "logo": tmdb_info.get("logo"),
+            "logo_w500": tmdb_info.get("logo_w500"),
+            "backdrop": tmdb_info.get("backdrop"),
+            "poster": tmdb_info.get("poster"),
+            "logos": tmdb_info.get("logos", []),
             "seasons": _shape_seasons(data),
             "dubs": _shape_dubs(data),
             "data": data,
         }
         _cache_set(cache_key, result, DETAILS_TTL)
+        
+        # Predictive background stream pre-warm: Fetch streams while user is reading details
+        asyncio.create_task(_background_prefetch_next_ep(detail_path, 1, 1))
+
         return result
     except HTTPException:
         raise
@@ -1076,23 +1285,41 @@ async def get_details(detail_path: str):
 @app.get("/download/{detail_path}")
 async def get_download_links(
     detail_path: str,
-    season: int = Query(0, ge=0, description="Season number (TV series only)"),
-    episode: int = Query(0, ge=0, description="Episode number (TV series only)"),
-    se: int = Query(0, ge=0, description="Alias for season"),
-    ep: int = Query(0, ge=0, description="Alias for episode"),
+    season: int = 0,
+    episode: int = 0,
+    se: int = 0,
+    ep: int = 0,
 ):
-    """All available stream / download links + subtitles in a single request.
+    """All available stream / download links + subtitles + logo in a single request.
     
-    Resolves both slug and subject ID dynamically through netfilm streaming engine.
+    Uses high-speed Net27 engine (1080p/720p/480p/360p direct CDN MP4s) with Netfilm fallback.
     """
-    season_val = max(season, se)
-    episode_val = max(episode, ep)
+    season_val = max(int(season or 0), int(se or 0))
+    episode_val = max(int(episode or 0), int(ep or 0))
 
     try:
-        details_data = await _fetch_details(detail_path)
+        candidate = _extract_slug_title(detail_path)
+        
+        # Parallel Step 1: Fetch MovieBox Detail + TMDB Info concurrently
+        hint_series = True if (season_val > 0 or episode_val > 0) else None
+        if candidate:
+            task_detail = _fetch_details(detail_path)
+            task_tmdb = _resolve_tmdb_info(candidate, is_series=hint_series)
+            details_data, tmdb_info = await asyncio.gather(task_detail, task_tmdb)
+        else:
+            details_data = await _fetch_details(detail_path)
+            subject = (details_data or {}).get("subject") or {}
+            title = subject.get("title", "Unknown")
+            year = subject.get("releaseDate", "")
+            is_series = subject.get("subjectType") == SubjectType.TV_SERIES.value
+            tmdb_info = await _resolve_tmdb_info(title, year, is_series)
+
         subject = (details_data or {}).get("subject") or {}
         subject_id = str(subject.get("subjectId") or detail_path)
         detail_path_slug = str(subject.get("detailPath") or detail_path)
+        title = subject.get("title", "Unknown")
+        year = subject.get("releaseDate", "")
+        raw_dubs = subject.get("dubs", [])
 
         is_series = subject.get("subjectType") == SubjectType.TV_SERIES.value
         eff_se = season_val
@@ -1107,146 +1334,172 @@ async def get_download_links(
         if cached is not None:
             return {**cached, "cached": True}
 
-        # Fetch direct player streams via netfilm engine
-        dom_data = await _api_get("/wefeed-h5api-bff/media-player/get-domain")
-        domain = str(dom_data if isinstance(dom_data, str) else (dom_data.get("data") if isinstance(dom_data, dict) else "https://netfilm.world")).rstrip("/")
-        if not domain.startswith("http"):
-            domain = "https://netfilm.world"
+        # Verify TMDB match against exact subjectType
+        resolved_type = tmdb_info.get("media_type")
+        expected_type = "tv" if is_series else "movie"
+        if not tmdb_info.get("tmdb_id") or (resolved_type and resolved_type != expected_type):
+            tmdb_info = await _resolve_tmdb_info(title, year, is_series)
 
-        type_str = "/tv/detail" if is_series else "/movie/detail"
-        player_referer = (
-            f"{domain}/spa/videoPlayPage/movies/{detail_path_slug}"
-            f"?id={subject_id}&type={type_str}&detailSe={eff_se}&detailEp={eff_ep}&lang=en"
-        )
-        play_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={eff_se}&ep={eff_ep}&detailPath={detail_path_slug}"
+        tmdb_id = tmdb_info.get("tmdb_id")
 
-        token = await _get_bearer_token()
-        
-        # Spoofed residential IP headers to bypass datacenter blocking on cloud hosts
-        ip = _resolve_spoofed_ip()
-        ip_headers = {}
-        if ip:
-            ip_headers = {
-                "X-Forwarded-For": ip,
-                "X-Real-IP": ip,
-                "Client-IP": ip,
-                "CF-Connecting-IP": ip,
-            }
-
-        headers = {
-            **PLAYER_HEADERS,
-            **ip_headers,
-            "Referer": player_referer,
-            "Authorization": f"Bearer {token}" if token else ""
-        }
-
-        client = getattr(app.state, "client", None)
-        if client is None:
-            async with httpx.AsyncClient(http2=True, timeout=_TIMEOUT, follow_redirects=True) as temp_client:
-                play_resp = await temp_client.get(play_url, headers=headers)
-        else:
-            play_resp = await client.get(play_url, headers=headers)
-
-        play_data = play_resp.json().get("data", {}) if play_resp.status_code == 200 else {}
-        streams = play_data.get("streams", [])
-        dash = play_data.get("dash", [])
-        hls = play_data.get("hls", [])
-
-        # If empty streams with detailPath, retry play with numeric subjectId
-        if not streams and not dash and detail_path_slug != subject_id:
-            try:
-                retry_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={eff_se}&ep={eff_ep}&detailPath={subject_id}"
-                if client is None:
-                    async with httpx.AsyncClient(http2=True, timeout=_TIMEOUT, follow_redirects=True) as temp_client:
-                        retry_resp = await temp_client.get(retry_url, headers=headers)
-                else:
-                    retry_resp = await client.get(retry_url, headers=headers)
-                retry_data = retry_resp.json().get("data", {}) if retry_resp.status_code == 200 else {}
-                if retry_data.get("streams"):
-                    play_data = retry_data
-                    streams = play_data.get("streams", [])
-                    dash = play_data.get("dash", [])
-                    hls = play_data.get("hls", [])
-            except Exception:
-                pass
-
-        # Format stream files
         files = []
-        for s in streams:
-            url = s.get("url") or ""
-            res_val = s.get("resolutions")
-            size_b = int(s.get("size", 0) or 0)
-            res_str = f"{res_val}p" if res_val else "unknown"
-            files.append({
-                "resolution": res_str,
-                "resolution_value": int(res_val) if str(res_val).isdigit() else 0,
-                "size_bytes": size_b,
-                "size_mb": round(size_b / (1024 * 1024), 2),
-                "ext": "mp4",
-                "id": str(s.get("id", "")),
-                "stream_link": url,
-                "codec": s.get("codecName"),
-                "duration": s.get("duration"),
-                "vip_locked": s.get("vipLocked", False)
-            })
-
-        # Fetch captions
         captions = []
-        stream_id = None
-        stream_format = "MP4"
-        if streams:
-            stream_id = streams[0].get("id")
-            stream_format = streams[0].get("format", "MP4")
-        elif dash:
-            stream_id = dash[0].get("id")
-            stream_format = dash[0].get("format", "DASH")
+        hls = []
+        dash = []
+        has_res = False
 
-        if stream_id:
-            try:
-                cap_params = {
-                    "format": stream_format,
-                    "id": str(stream_id),
-                    "subjectId": str(subject_id),
-                    "detailPath": str(detail_path_slug)
-                }
-                cap_data = await _api_get("/wefeed-h5api-bff/subject/caption", params=cap_params)
-                raw_caps = cap_data.get("captions", []) if isinstance(cap_data, dict) else (cap_data if isinstance(cap_data, list) else [])
-                for c in raw_caps or []:
-                    captions.append({
-                        "language": c.get("lanName") or c.get("lan"),
-                        "language_code": c.get("lan"),
-                        "size_bytes": int(c.get("size", 0) or 0),
-                        "delay": c.get("delay", 0),
-                        "url": c.get("url"),
-                    })
-            except Exception as e:
-                logger.warning(f"Failed to fetch captions: {e}")
-
-        # Fallback to subject/download if play returned no files
-        if not files:
-            try:
-                params = {
-                    "subjectId": str(subject_id),
-                    "detailPath": str(detail_path_slug),
-                    "se": eff_se,
-                    "ep": eff_ep,
-                }
-                dl_data = await _api_get("/wefeed-h5api-bff/subject/download", params)
-                downloads = (dl_data or {}).get("downloads", []) or []
-                for m in downloads:
-                    url = m.get("url") or ""
-                    size_b = int(m.get("size", 0) or 0)
+        # 2. Try Primary Net27 Engine for full resolutions (360p, 480p, 720p, 1080p)
+        if tmdb_id:
+            net27_data = await _fetch_net27_stream_sources(
+                tmdb_id=tmdb_id,
+                is_series=is_series,
+                se=eff_se,
+                ep=eff_ep,
+                subject_id=subject_id,
+                detail_path=detail_path_slug,
+                dubs=raw_dubs
+            )
+            if net27_data and net27_data.get("streams"):
+                has_res = True
+                for s in net27_data.get("streams", []):
+                    url = s.get("url") or ""
+                    if not url:
+                        continue
+                    res_val = s.get("resolution")
+                    size_b = int(s.get("size", 0) or 0)
                     files.append({
-                        "resolution": f"{m.get('resolution')}p",
-                        "resolution_value": m.get("resolution"),
+                        "resolution": f"{res_val}p" if res_val else "unknown",
+                        "resolution_value": int(res_val) if str(res_val).isdigit() else 0,
                         "size_bytes": size_b,
                         "size_mb": round(size_b / (1024 * 1024), 2),
                         "ext": "mp4",
-                        "id": str(m.get("id", "")),
+                        "id": str(s.get("id", "")),
                         "stream_link": url,
+                        "codec": s.get("codec") or "h264",
+                        "vip_locked": False
                     })
-                if not captions:
-                    for c in (dl_data or {}).get("captions", []) or []:
+                # Sort files by resolution descending (1080p, 720p, 480p, 360p)
+                files.sort(key=lambda x: x.get("resolution_value", 0), reverse=True)
+
+                # Parse captions from Net27
+                for c in net27_data.get("captions", []):
+                    c_url = c.get("url") or ""
+                    if "url=" in c_url:
+                        c_url = c_url.split("url=", 1)[-1]
+                        c_url = unquote(c_url)
+                    captions.append({
+                        "language": c.get("name") or c.get("lang"),
+                        "language_code": c.get("lang"),
+                        "size_bytes": 0,
+                        "delay": 0,
+                        "url": c_url,
+                    })
+
+                if net27_data.get("fallbackHls"):
+                    hls.append({"url": net27_data.get("fallbackHls"), "format": "HLS"})
+
+        # 3. Fallback to Legacy Netfilm/Moviebox Engine if Net27 has no files
+        if not files:
+            dom_data = await _api_get("/wefeed-h5api-bff/media-player/get-domain")
+            domain = str(dom_data if isinstance(dom_data, str) else (dom_data.get("data") if isinstance(dom_data, dict) else "https://netfilm.world")).rstrip("/")
+            if not domain.startswith("http"):
+                domain = "https://netfilm.world"
+
+            type_str = "/tv/detail" if is_series else "/movie/detail"
+            player_referer = (
+                f"{domain}/spa/videoPlayPage/movies/{detail_path_slug}"
+                f"?id={subject_id}&type={type_str}&detailSe={eff_se}&detailEp={eff_ep}&lang=en"
+            )
+            play_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={eff_se}&ep={eff_ep}&detailPath={detail_path_slug}"
+
+            token = await _get_bearer_token()
+            ip = _resolve_spoofed_ip()
+            ip_headers = {}
+            if ip:
+                ip_headers = {
+                    "X-Forwarded-For": ip,
+                    "X-Real-IP": ip,
+                    "Client-IP": ip,
+                    "CF-Connecting-IP": ip,
+                }
+
+            headers = {
+                **PLAYER_HEADERS,
+                **ip_headers,
+                "Referer": player_referer,
+                "Authorization": f"Bearer {token}" if token else ""
+            }
+
+            client = getattr(app.state, "client", None)
+            if client is None:
+                async with httpx.AsyncClient(http2=True, timeout=_TIMEOUT, follow_redirects=True) as temp_client:
+                    play_resp = await temp_client.get(play_url, headers=headers)
+            else:
+                play_resp = await client.get(play_url, headers=headers)
+
+            play_data = play_resp.json().get("data", {}) if play_resp.status_code == 200 else {}
+            streams = play_data.get("streams", [])
+            dash = play_data.get("dash", [])
+            hls = play_data.get("hls", [])
+
+            if not streams and not dash and detail_path_slug != subject_id:
+                try:
+                    retry_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={eff_se}&ep={eff_ep}&detailPath={subject_id}"
+                    if client is None:
+                        async with httpx.AsyncClient(http2=True, timeout=_TIMEOUT, follow_redirects=True) as temp_client:
+                            retry_resp = await temp_client.get(retry_url, headers=headers)
+                    else:
+                        retry_resp = await client.get(retry_url, headers=headers)
+                    retry_data = retry_resp.json().get("data", {}) if retry_resp.status_code == 200 else {}
+                    if retry_data.get("streams"):
+                        play_data = retry_data
+                        streams = play_data.get("streams", [])
+                        dash = play_data.get("dash", [])
+                        hls = play_data.get("hls", [])
+                except Exception:
+                    pass
+
+            for s in streams:
+                url = s.get("url") or ""
+                if not url:
+                    continue
+                res_val = s.get("resolutions")
+                size_b = int(s.get("size", 0) or 0)
+                res_str = f"{res_val}p" if res_val else "unknown"
+                files.append({
+                    "resolution": res_str,
+                    "resolution_value": int(res_val) if str(res_val).isdigit() else 0,
+                    "size_bytes": size_b,
+                    "size_mb": round(size_b / (1024 * 1024), 2),
+                    "ext": "mp4",
+                    "id": str(s.get("id", "")),
+                    "stream_link": url,
+                    "codec": s.get("codecName"),
+                    "duration": s.get("duration"),
+                    "vip_locked": s.get("vipLocked", False)
+                })
+
+            # Fetch captions for legacy stream
+            stream_id = None
+            stream_format = "MP4"
+            if streams:
+                stream_id = streams[0].get("id")
+                stream_format = streams[0].get("format", "MP4")
+            elif dash:
+                stream_id = dash[0].get("id")
+                stream_format = dash[0].get("format", "DASH")
+
+            if stream_id and not captions:
+                try:
+                    cap_params = {
+                        "format": stream_format,
+                        "id": str(stream_id),
+                        "subjectId": str(subject_id),
+                        "detailPath": str(detail_path_slug)
+                    }
+                    cap_data = await _api_get("/wefeed-h5api-bff/subject/caption", params=cap_params)
+                    raw_caps = cap_data.get("captions", []) if isinstance(cap_data, dict) else (cap_data if isinstance(cap_data, list) else [])
+                    for c in raw_caps or []:
                         captions.append({
                             "language": c.get("lanName") or c.get("lan"),
                             "language_code": c.get("lan"),
@@ -1254,26 +1507,31 @@ async def get_download_links(
                             "delay": c.get("delay", 0),
                             "url": c.get("url"),
                         })
-            except Exception:
-                pass
+                except Exception as e:
+                    logger.warning(f"Failed to fetch captions: {e}")
 
         cover = subject.get("cover") or {}
         subject_type = subject.get("subjectType")
         valid_stream_files = [f for f in files if f.get("stream_link")]
-        has_res = len(valid_stream_files) > 0 or play_data.get("hasResource", False)
+        has_res = len(valid_stream_files) > 0 or has_res
 
         result = {
             "status": "success",
             "detail_path": detail_path_slug,
             "subject_id": str(subject_id),
-            "title": subject.get("title", "Unknown"),
+            "tmdb_id": tmdb_info.get("tmdb_id"),
+            "logo": tmdb_info.get("logo"),
+            "logo_w500": tmdb_info.get("logo_w500"),
+            "backdrop": tmdb_info.get("backdrop"),
+            "poster": tmdb_info.get("poster"),
+            "title": title,
             "subject_type": _SUBJECT_TYPE_NAME.get(subject_type, str(subject_type)),
             "season": eff_se if is_series else None,
             "episode": eff_ep if is_series else None,
             "release_date": subject.get("releaseDate", ""),
             "cover_image": cover.get("url"),
             "has_resource": has_res,
-            "limited": play_data.get("limited", False),
+            "limited": False,
             "qualities_count": len(files),
             "files": files,
             "subtitles": captions,
@@ -1282,11 +1540,14 @@ async def get_download_links(
             "cached": False
         }
         
-        # Only cache when files are successfully extracted
+        # Cache when files are extracted
         if len(valid_stream_files) > 0:
             _cache_set(cache_key, result, DETAILS_TTL)
             if detail_path != subject_id:
                 _cache_set(f"download:{detail_path}:{eff_se}:{eff_ep}", result, DETAILS_TTL)
+            # Predictive background pre-warm for next episode
+            if is_series and eff_ep > 0:
+                asyncio.create_task(_background_prefetch_next_ep(detail_path_slug, eff_se, eff_ep + 1))
 
         return result
     except HTTPException:
@@ -1298,71 +1559,42 @@ async def get_download_links(
 
 @app.get("/api/stream/{subject_id}")
 async def get_stream_sources(subject_id: str, detail_path: str = "", se: int = 1, ep: int = 1):
-    """Direct stream engine integration via media player domain."""
+    """Direct stream engine integration with Net27 1080p/720p/480p/360p + legacy fallback."""
     try:
-        dom_data = await _api_get("/wefeed-h5api-bff/media-player/get-domain")
-        domain = str(dom_data if isinstance(dom_data, str) else (dom_data.get("data") if isinstance(dom_data, dict) else "https://netfilm.world")).rstrip("/")
-        if not domain.startswith("http"):
-            domain = "https://netfilm.world"
-
-        player_referer = (
-            f"{domain}/spa/videoPlayPage/movies/{detail_path}"
-            f"?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en"
-        )
-        play_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}"
-
-        token = await _get_bearer_token()
-        ip = _resolve_spoofed_ip()
-        ip_headers = {}
-        if ip:
-            ip_headers = {
-                "X-Forwarded-For": ip,
-                "X-Real-IP": ip,
-                "Client-IP": ip,
-                "CF-Connecting-IP": ip,
-            }
-
-        headers = {
-            **PLAYER_HEADERS,
-            **ip_headers,
-            "Referer": player_referer,
-            "Authorization": f"Bearer {token}" if token else ""
-        }
-
-        client = getattr(app.state, "client", None)
-        if client is None:
-            async with httpx.AsyncClient(http2=True, timeout=_TIMEOUT, follow_redirects=True) as temp_client:
-                resp = await temp_client.get(play_url, headers=headers)
-        else:
-            resp = await client.get(play_url, headers=headers)
-
-        data = resp.json().get("data", {}) if resp.status_code == 200 else {}
-
-        has_resource = data.get("hasResource", False)
-        streams = [
+        slug = detail_path or subject_id
+        dl_res = await get_download_links(detail_path=slug, season=se, episode=ep)
+        
+        sources = [
             {
-                "resolution": f"{s.get('resolutions')}p",
-                "format": s.get("format"),
-                "url": s.get("url"),
-                "size": s.get("size"),
-                "duration": s.get("duration"),
-                "codec": s.get("codecName")
+                "resolution": f.get("resolution"),
+                "format": f.get("ext", "mp4").upper(),
+                "url": f.get("stream_link"),
+                "size": f.get("size_bytes"),
+                "duration": f.get("duration"),
+                "codec": f.get("codec")
             }
-            for s in data.get("streams", [])
+            for f in dl_res.get("files", [])
+            if f.get("stream_link")
         ]
+
         return {
             "status": "success",
-            "subject_id": subject_id,
-            "detail_path": detail_path,
+            "subject_id": str(dl_res.get("subject_id") or subject_id),
+            "detail_path": dl_res.get("detail_path") or detail_path,
+            "tmdb_id": dl_res.get("tmdb_id"),
+            "logo": dl_res.get("logo"),
+            "logo_w500": dl_res.get("logo_w500"),
+            "backdrop": dl_res.get("backdrop"),
+            "poster": dl_res.get("poster"),
             "se": se,
             "ep": ep,
-            "has_resource": has_resource,
-            "sources": streams,
-            "hls": data.get("hls", []),
-            "dash": data.get("dash", []),
-            "free_episodes": data.get("freeNum"),
-            "limited": data.get("limited", False),
-            "note": None if has_resource else "No stream found for this episode."
+            "has_resource": dl_res.get("has_resource", False),
+            "sources": sources,
+            "hls": dl_res.get("hls", []),
+            "dash": dl_res.get("dash", []),
+            "free_episodes": 999,
+            "limited": False,
+            "note": None if dl_res.get("has_resource") else "No stream found for this episode."
         }
     except Exception as e:
         logger.error(f"Error in stream extraction: {e}")
@@ -1371,69 +1603,19 @@ async def get_stream_sources(subject_id: str, detail_path: str = "", se: int = 1
 
 @app.get("/api/stream/{subject_id}/captions")
 async def get_captions(subject_id: str, detail_path: str = "", se: int = 1, ep: int = 1):
-    """Fetch captions for a stream subject."""
+    """Fetch captions for a stream subject with Net27 + legacy fallback."""
     try:
-        dom_data = await _api_get("/wefeed-h5api-bff/media-player/get-domain")
-        domain = str(dom_data if isinstance(dom_data, str) else (dom_data.get("data") if isinstance(dom_data, dict) else "https://netfilm.world")).rstrip("/")
-        if not domain.startswith("http"):
-            domain = "https://netfilm.world"
-
-        player_referer = (
-            f"{domain}/spa/videoPlayPage/movies/{detail_path}"
-            f"?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en"
-        )
-        play_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}"
-
-        token = await _get_bearer_token()
-        ip = _resolve_spoofed_ip()
-        ip_headers = {}
-        if ip:
-            ip_headers = {
-                "X-Forwarded-For": ip,
-                "X-Real-IP": ip,
-                "Client-IP": ip,
-                "CF-Connecting-IP": ip,
-            }
-
-        headers = {
-            **PLAYER_HEADERS,
-            **ip_headers,
-            "Referer": player_referer,
-            "Authorization": f"Bearer {token}" if token else ""
+        slug = detail_path or subject_id
+        dl_res = await get_download_links(detail_path=slug, season=se, episode=ep)
+        captions = dl_res.get("subtitles", [])
+        return {
+            "status": "success",
+            "subject_id": subject_id,
+            "se": se,
+            "ep": ep,
+            "count": len(captions),
+            "captions": captions
         }
-
-        client = getattr(app.state, "client", None)
-        if client is None:
-            async with httpx.AsyncClient(http2=True, timeout=_TIMEOUT, follow_redirects=True) as temp_client:
-                play_resp = await temp_client.get(play_url, headers=headers)
-        else:
-            play_resp = await client.get(play_url, headers=headers)
-
-        play_data = play_resp.json().get("data", {}) if play_resp.status_code == 200 else {}
-        streams = play_data.get("streams", [])
-        dash = play_data.get("dash", [])
-
-        stream_id = None
-        stream_format = None
-        if streams:
-            stream_id = streams[0].get("id")
-            stream_format = streams[0].get("format", "MP4")
-        elif dash:
-            stream_id = dash[0].get("id")
-            stream_format = dash[0].get("format", "DASH")
-
-        if not stream_id:
-            return {"status": "success", "subject_id": subject_id, "se": se, "ep": ep, "count": 0, "captions": []}
-
-        cap_params = {
-            "format": stream_format,
-            "id": str(stream_id),
-            "subjectId": str(subject_id),
-            "detailPath": str(detail_path)
-        }
-        data = await _api_get("/wefeed-h5api-bff/subject/caption", params=cap_params)
-        captions = data.get("captions", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
-        return {"status": "success", "subject_id": subject_id, "se": se, "ep": ep, "count": len(captions), "captions": captions}
     except Exception as e:
         logger.error(f"Error fetching captions: {e}")
         raise HTTPException(status_code=502, detail=str(e))
