@@ -1881,13 +1881,69 @@ async def get_homepage():
     return result
 
 
+async def _fetch_tmdb_season_episodes(tmdb_id: int, season_number: int = 1) -> list[dict]:
+    """Fetch complete enriched episode list for a specific TV show season from TMDB."""
+    cache_key = f"tmdb_season_episodes:{tmdb_id}:{season_number}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    client = _get_client()
+    url = f"https://api.themoviedb.org/3/tv/{tmdb_id}/season/{season_number}?api_key={TMDB_API_KEY}"
+    try:
+        r = await client.get(url, timeout=6.0)
+        if r.status_code == 200:
+            data = r.json()
+            raw_eps = data.get("episodes", [])
+            episodes = []
+            for ep in raw_eps:
+                ep_num = ep.get("episode_number")
+                still_p = ep.get("still_path")
+                episodes.append({
+                    "episode_number": ep_num,
+                    "season_number": season_number,
+                    "name": ep.get("name") or f"Episode {ep_num}",
+                    "overview": ep.get("overview", ""),
+                    "still_path": f"https://image.tmdb.org/t/p/original{still_p}" if still_p else None,
+                    "still_w500": f"https://image.tmdb.org/t/p/w500{still_p}" if still_p else None,
+                    "air_date": ep.get("air_date", ""),
+                    "runtime_minutes": ep.get("runtime"),
+                    "rating": round(ep.get("vote_average", 0.0), 1) if ep.get("vote_average") else None,
+                    "vote_count": ep.get("vote_count", 0),
+                    "stream_url": f"/download/tmdb/{tmdb_id}?type=tv&season={season_number}&episode={ep_num}"
+                })
+            _cache_set(cache_key, episodes, DETAILS_TTL)
+            return episodes
+    except Exception as e:
+        logger.warning(f"Failed to fetch TMDB season {season_number} for {tmdb_id}: {e}")
+    return []
+
+
+@app.get("/details/tmdb/{tmdb_id}/season/{season_number}")
+@app.get("/tv/{tmdb_id}/season/{season_number}")
+@app.get("/season/tmdb/{tmdb_id}")
+async def get_tmdb_season_details(
+    tmdb_id: int,
+    season_number: int = 1,
+    season: int | None = None
+):
+    """Fetch complete list of episodes with thumbnails and direct stream URLs for a TV season."""
+    target_season = season if season is not None else season_number
+    episodes = await _fetch_tmdb_season_episodes(tmdb_id=tmdb_id, season_number=target_season)
+    return {
+        "status": "success",
+        "tmdb_id": tmdb_id,
+        "season_number": target_season,
+        "total_episodes": len(episodes),
+        "episodes": episodes
+    }
 @app.get("/details/tmdb/{tmdb_id}")
 @app.get("/detail/tmdb/{tmdb_id}")
 async def get_tmdb_direct_details(
     tmdb_id: int,
     type: str | None = Query(None, description="Media type: 'movie' or 'tv'")
 ):
-    """Direct TMDB Item Details with official logos, cast, trailer, and stream pre-warming."""
+    """Direct TMDB Item Details with official logos, cast, trailer, full season episodes, and stream pre-warming."""
     if isinstance(type, str) and type.lower().strip() in ("tv", "series"):
         media_type = "tv"
     elif isinstance(type, str) and type.lower().strip() in ("movie", "movies"):
@@ -1973,8 +2029,9 @@ async def get_tmdb_direct_details(
             "profile_image": f"https://image.tmdb.org/t/p/w185{p_path}" if p_path else None
         })
 
-    # Seasons shaping for TV
+    # Seasons and Episodes shaping for TV
     seasons = []
+    episodes = []
     if media_type == "tv":
         for s in data.get("seasons", []):
             s_num = s.get("season_number")
@@ -1985,6 +2042,8 @@ async def get_tmdb_direct_details(
                     "episode_count": s.get("episode_count", 0),
                     "poster": f"https://image.tmdb.org/t/p/w500{s.get('poster_path')}" if s.get("poster_path") else None
                 })
+        first_season_num = seasons[0]["season_number"] if seasons else 1
+        episodes = await _fetch_tmdb_season_episodes(tmdb_id=tmdb_id, season_number=first_season_num)
 
     result = {
         "status": "success",
@@ -2007,6 +2066,9 @@ async def get_tmdb_direct_details(
         "trailer": trailer_url,
         "cast": cast_list,
         "seasons": seasons if media_type == "tv" else None,
+        "episodes": episodes if media_type == "tv" else None,
+        "total_seasons": len(seasons) if media_type == "tv" else None,
+        "total_episodes": sum(s.get("episode_count", 0) for s in seasons) if media_type == "tv" else None,
         "stream_url": f"/download/tmdb/{tmdb_id}?type={media_type}&season=1&episode=1"
     }
     _cache_set(cache_key, result, DETAILS_TTL)
