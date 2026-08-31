@@ -1900,7 +1900,7 @@ async def get_homepage():
     return result
 
 
-async def _resolve_moviebox_dubs(title: str, tmdb_id: int | None = None) -> list[dict]:
+async def _resolve_moviebox_dubs(title: str, tmdb_id: int | None = None, is_series: bool = True) -> list[dict]:
     """Fetch and cache available dubs/languages from MovieBox for a given title/TMDB ID."""
     clean = _clean_title(title)
     if not clean:
@@ -1915,11 +1915,40 @@ async def _resolve_moviebox_dubs(title: str, tmdb_id: int | None = None) -> list
     try:
         res = await _api_post(
             "/wefeed-h5api-bff/subject/search",
-            json_body={"keyword": clean, "page": 1, "perPage": 5}
+            json_body={"keyword": clean, "page": 1, "perPage": 10}
         )
         items = (res or {}).get("items", []) if isinstance(res, dict) else []
-        if items:
-            top_dp = items[0].get("detailPath")
+        target_type = SubjectType.TV_SERIES.value if is_series else SubjectType.MOVIES.value
+        
+        # Match candidates with title relevance and matching media type
+        clean_words = set(re.findall(r"\w+", clean.lower()))
+        best_item = None
+
+        for it in items:
+            sub = it.get("subject", it)
+            it_title = str(sub.get("title") or "").lower()
+            it_type = sub.get("subjectType")
+            
+            # Media type check
+            if it_type != target_type:
+                continue
+            
+            # Title relevance check: must share words with the title
+            it_words = set(re.findall(r"\w+", it_title))
+            if clean_words & it_words:
+                best_item = sub
+                break
+
+        if not best_item and items:
+            for it in items:
+                sub = it.get("subject", it)
+                dp = str(sub.get("detailPath") or "").lower()
+                if any(w in dp for w in clean_words if len(w) > 2):
+                    best_item = sub
+                    break
+
+        if best_item:
+            top_dp = best_item.get("detailPath")
             if top_dp:
                 d_data = await _fetch_details(top_dp)
                 dubs = _shape_dubs(d_data)
@@ -2193,36 +2222,62 @@ async def get_tmdb_direct_stream(
     # 2. Fallback: Search MovieBox by title if no streams yet
     if not files and tmdb_info and tmdb_info.get("title"):
         clean_title = _clean_title(tmdb_info.get("title"))
+        search_terms = [clean_title]
+        
+        # If this TV season has a specific subtitle/name (e.g. Bleach S2: Thousand-Year Blood War), prioritize it
+        if is_series and season_val and season_val > 1:
+            seasons_list = (tmdb_info or {}).get("seasons", []) or []
+            for s in seasons_list:
+                if s.get("season_number") == season_val:
+                    s_name = str(s.get("name") or "")
+                    if s_name and s_name.lower() != f"season {season_val}":
+                        search_terms.insert(0, f"{clean_title}: {s_name}")
+                        break
+
         try:
-            mb_search = await _api_post(
-                "/wefeed-h5api-bff/subject/search",
-                json_body={"keyword": clean_title, "page": 1, "perPage": 10}
-            )
-            raw_items = (mb_search or {}).get("items", []) if isinstance(mb_search, dict) else []
+            raw_items = []
+            for kw in search_terms:
+                mb_search = await _api_post(
+                    "/wefeed-h5api-bff/subject/search",
+                    json_body={"keyword": kw, "page": 1, "perPage": 10}
+                )
+                items = (mb_search or {}).get("items", []) if isinstance(mb_search, dict) else []
+                if items:
+                    raw_items.extend(items)
+                    if len(search_terms) > 1:
+                        break
+
             target_sub_type = SubjectType.TV_SERIES.value if is_series else SubjectType.MOVIES.value
             candidate_matches = []
             for it in raw_items:
-                if it.get("subjectType") == target_sub_type:
-                    candidate_matches.append(it)
+                sub = it.get("subject", it)
+                if sub.get("subjectType") == target_sub_type:
+                    candidate_matches.append(sub)
             if not candidate_matches and raw_items:
-                candidate_matches = raw_items[:3]
+                candidate_matches = [it.get("subject", it) for it in raw_items[:3]]
 
             async def _probe_single_candidate(m):
                 sid = str(m.get("subjectId"))
                 dp = str(m.get("detailPath"))
-                mb_play = await _fetch_moviebox_play_streams(
-                    subject_id=sid,
-                    detail_path=dp,
-                    is_series=is_series,
-                    se=season_val if is_series else 0,
-                    ep=episode_val if is_series else 0,
-                    fetch_captions=False
-                )
-                if mb_play and mb_play.get("files"):
-                    return mb_play
+                # Try requested season first, if series and season > 1 also try se=1 if it is a standalone subject
+                eff_se_tries = [season_val] if is_series else [0]
+                if is_series and season_val and season_val > 1:
+                    eff_se_tries.append(1)
+
+                for try_se in eff_se_tries:
+                    mb_play = await _fetch_moviebox_play_streams(
+                        subject_id=sid,
+                        detail_path=dp,
+                        is_series=is_series,
+                        se=try_se,
+                        ep=episode_val if is_series else 0,
+                        fetch_captions=False
+                    )
+                    if mb_play and mb_play.get("files"):
+                        return mb_play
                 return None
 
-            probe_tasks = [_probe_single_candidate(m) for m in candidate_matches[:3]]
+            probe_tasks = [_probe_single_candidate(m) for m in candidate_matches[:4]]
             probe_results = await asyncio.gather(*probe_tasks, return_exceptions=True)
 
             for pr in probe_results:
