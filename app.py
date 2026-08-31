@@ -1060,10 +1060,10 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
     all_logos = []
     resolved_media_type = "tv" if is_series is True else "movie"
 
+    # Fast TMDB Search (search multi or specific type)
+    endpoint = "multi" if is_series is None else ("tv" if is_series else "movie")
+    search_url = f"https://api.themoviedb.org/3/search/{endpoint}?api_key={TMDB_API_KEY}&query={quote(cleaned)}"
     try:
-        # Fast TMDB Search (search multi or specific type)
-        endpoint = "multi" if is_series is None else ("tv" if is_series else "movie")
-        search_url = f"https://api.themoviedb.org/3/search/{endpoint}?api_key={TMDB_API_KEY}&query={quote(cleaned)}"
         r = await client.get(search_url, timeout=3.5)
         if r.status_code == 200:
             results = r.json().get("results", [])
@@ -1078,55 +1078,54 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
                 backdrop_path = top.get("backdrop_path")
                 if "media_type" in top:
                     resolved_media_type = top.get("media_type")
+    except Exception:
+        pass
 
-        # Fetch title logos from TMDB images if TMDB ID resolved
-        if tmdb_id:
-            try:
-                img_url = f"https://api.themoviedb.org/3/{resolved_media_type}/{tmdb_id}/images?api_key={TMDB_API_KEY}"
-                r_img = await client.get(img_url, timeout=3.5)
-                if r_img.status_code == 200:
-                    img_data = r_img.json()
-                    raw_logos = img_data.get("logos", [])
-                    for l in raw_logos:
-                        fp = l.get("file_path")
-                        if fp:
-                            full_p = f"https://image.tmdb.org/t/p/original{fp}"
-                            all_logos.append({
-                                "url": full_p,
-                                "url_w500": f"https://image.tmdb.org/t/p/w500{fp}",
-                                "aspect_ratio": l.get("aspect_ratio"),
-                                "width": l.get("width"),
-                                "height": l.get("height"),
-                                "lang": l.get("iso_639_1"),
-                                "vote_average": l.get("vote_average"),
-                                "vote_count": l.get("vote_count"),
-                            })
-                    # Smart English-First Logo Selection
-                    NON_LATIN_LANGS = {"zh", "ja", "ko", "ar", "ru", "hi", "th", "he", "fa", "el", "ta", "te", "bn"}
-                    en_logos = [l for l in all_logos if l.get("lang") == "en"]
-                    picked_logo = None
+    # Fetch title logos from TMDB images if TMDB ID resolved
+    if tmdb_id:
+        try:
+            img_url = f"https://api.themoviedb.org/3/{resolved_media_type}/{tmdb_id}/images?api_key={TMDB_API_KEY}"
+            r_img = await client.get(img_url, timeout=3.5)
+            if r_img.status_code == 200:
+                img_data = r_img.json()
+                raw_logos = img_data.get("logos", [])
+                for l in raw_logos:
+                    fp = l.get("file_path")
+                    if fp:
+                        full_p = f"https://image.tmdb.org/t/p/original{fp}"
+                        all_logos.append({
+                            "url": full_p,
+                            "url_w500": f"https://image.tmdb.org/t/p/w500{fp}",
+                            "aspect_ratio": l.get("aspect_ratio"),
+                            "width": l.get("width"),
+                            "height": l.get("height"),
+                            "lang": l.get("iso_639_1"),
+                            "vote_average": l.get("vote_average"),
+                            "vote_count": l.get("vote_count"),
+                        })
+                # Smart English-First Logo Selection
+                NON_LATIN_LANGS = {"zh", "ja", "ko", "ar", "ru", "hi", "th", "he", "fa", "el", "ta", "te", "bn"}
+                en_logos = [l for l in all_logos if l.get("lang") == "en"]
+                picked_logo = None
 
-                    if en_logos:
-                        best_en = sorted(en_logos, key=lambda x: (x.get("vote_average", 0), x.get("vote_count", 0)), reverse=True)[0]
-                        top_global = all_logos[0]
-                        global_lang = top_global.get("lang")
-                        # If top rated global is in latin script and has significantly higher community votes, use it
-                        if global_lang not in NON_LATIN_LANGS and top_global.get("vote_average", 0) > best_en.get("vote_average", 0) + 1.0:
-                            picked_logo = top_global
-                        else:
-                            picked_logo = best_en
-                    elif all_logos:
-                        latin_logos = [l for l in all_logos if l.get("lang") not in NON_LATIN_LANGS]
-                        picked_logo = latin_logos[0] if latin_logos else all_logos[0]
+                if en_logos:
+                    best_en = sorted(en_logos, key=lambda x: (x.get("vote_average", 0), x.get("vote_count", 0)), reverse=True)[0]
+                    top_global = all_logos[0]
+                    global_lang = top_global.get("lang")
+                    # If top rated global is in latin script and has significantly higher community votes, use it
+                    if global_lang not in NON_LATIN_LANGS and top_global.get("vote_average", 0) > best_en.get("vote_average", 0) + 1.0:
+                        picked_logo = top_global
+                    else:
+                        picked_logo = best_en
+                elif all_logos:
+                    latin_logos = [l for l in all_logos if l.get("lang") not in NON_LATIN_LANGS]
+                    picked_logo = latin_logos[0] if latin_logos else all_logos[0]
 
-                    if picked_logo:
-                        logo_url = picked_logo["url"]
-                        logo_w500 = picked_logo["url_w500"]
-            except Exception:
-                pass
-    finally:
-        if should_close:
-            await client.aclose()
+                if picked_logo:
+                    logo_url = picked_logo["url"]
+                    logo_w500 = picked_logo["url_w500"]
+        except Exception:
+            pass
 
     res = {
         "tmdb_id": tmdb_id,
