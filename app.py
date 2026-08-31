@@ -1055,8 +1055,9 @@ def _clean_title(title: str) -> str:
     if not title:
         return ""
     t = re.sub(r"\[.*?\]|\(.*?\)", "", title)
-    t = re.sub(r":\s*Season\s*\d+", "", t, flags=re.IGNORECASE)
-    t = re.sub(r"Season\s*\d+", "", t, flags=re.IGNORECASE)
+    t = re.sub(r":?\s*Season\s*\d+(-(Season\s*)?\d+)?", "", t, flags=re.IGNORECASE)
+    t = re.sub(r":?\s*S\d+(-S\d+)?", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s+", " ", t)
     return t.strip()
 
 
@@ -1403,9 +1404,14 @@ async def get_details(detail_path: str):
             data = await _fetch_details(detail_path)
             subject = (data or {}).get("subject") or {}
             title = subject.get("title", "")
+            slug = subject.get("detailPath", "")
             year = subject.get("releaseDate", "")
             is_series = subject.get("subjectType") == SubjectType.TV_SERIES.value
-            tmdb_info = await _resolve_tmdb_info(title, year, is_series)
+            slug_cand = _extract_slug_title(slug) if slug else ""
+            query_title = slug_cand if slug_cand else title
+            tmdb_info = await _resolve_tmdb_info(query_title, year, is_series)
+            if not tmdb_info.get("tmdb_id") and query_title != title:
+                tmdb_info = await _resolve_tmdb_info(title, year, is_series)
 
         subject = (data or {}).get("subject") or {}
         is_series = subject.get("subjectType") == SubjectType.TV_SERIES.value
@@ -1485,9 +1491,14 @@ async def get_download_links(
             details_data = await _fetch_details(detail_path)
             subject = (details_data or {}).get("subject") or {}
             title = subject.get("title", "Unknown")
+            slug = subject.get("detailPath", "")
             year = subject.get("releaseDate", "")
             is_series = subject.get("subjectType") == SubjectType.TV_SERIES.value
-            tmdb_info = await _resolve_tmdb_info(title, year, is_series)
+            slug_cand = _extract_slug_title(slug) if slug else ""
+            query_title = slug_cand if slug_cand else title
+            tmdb_info = await _resolve_tmdb_info(query_title, year, is_series)
+            if not tmdb_info.get("tmdb_id") and query_title != title:
+                tmdb_info = await _resolve_tmdb_info(title, year, is_series)
 
         subject = (details_data or {}).get("subject") or {}
         subject_id = str(subject.get("subjectId") or detail_path)
