@@ -1887,6 +1887,36 @@ async def get_homepage():
     return result
 
 
+async def _resolve_moviebox_dubs(title: str, tmdb_id: int | None = None) -> list[dict]:
+    """Fetch and cache available dubs/languages from MovieBox for a given title/TMDB ID."""
+    clean = _clean_title(title)
+    if not clean:
+        return []
+
+    cache_key = f"tmdb_dubs:{tmdb_id or clean}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    dubs = []
+    try:
+        res = await _api_post(
+            "/wefeed-h5api-bff/subject/search",
+            json_body={"keyword": clean, "page": 1, "perPage": 5}
+        )
+        items = (res or {}).get("items", []) if isinstance(res, dict) else []
+        if items:
+            top_dp = items[0].get("detailPath")
+            if top_dp:
+                d_data = await _fetch_details(top_dp)
+                dubs = _shape_dubs(d_data)
+    except Exception as e:
+        logger.warning(f"Error fetching dubs for '{title}': {e}")
+
+    _cache_set(cache_key, dubs, DETAILS_TTL)
+    return dubs
+
+
 async def _fetch_tmdb_season_episodes(tmdb_id: int, season_number: int = 1) -> list[dict]:
     """Fetch complete enriched episode list for a specific TV show season from TMDB."""
     cache_key = f"tmdb_season_episodes:{tmdb_id}:{season_number}"
@@ -2004,7 +2034,7 @@ async def get_tmdb_direct_details(
             "profile_image": f"https://image.tmdb.org/t/p/w185{p_path}" if p_path else None
         })
 
-    # Seasons and Episodes shaping for TV
+    # Seasons, Episodes and Dubs shaping
     seasons = []
     episodes = []
     if media_type == "tv":
@@ -2018,7 +2048,16 @@ async def get_tmdb_direct_details(
                     "poster": f"https://image.tmdb.org/t/p/w500{s.get('poster_path')}" if s.get("poster_path") else None
                 })
         first_season_num = seasons[0]["season_number"] if seasons else 1
-        episodes = await _fetch_tmdb_season_episodes(tmdb_id=tmdb_id, season_number=first_season_num)
+        eps_task = _fetch_tmdb_season_episodes(tmdb_id=tmdb_id, season_number=first_season_num)
+        dubs_task = _resolve_moviebox_dubs(title, tmdb_id)
+        ep_res, dub_res = await asyncio.gather(eps_task, dubs_task, return_exceptions=True)
+        episodes = ep_res if isinstance(ep_res, list) else []
+        dubs = dub_res if isinstance(dub_res, list) else []
+    else:
+        try:
+            dubs = await _resolve_moviebox_dubs(title, tmdb_id)
+        except Exception:
+            dubs = []
 
     result = {
         "status": "success",
@@ -2044,6 +2083,7 @@ async def get_tmdb_direct_details(
         "episodes": episodes if media_type == "tv" else None,
         "total_seasons": len(seasons) if media_type == "tv" else None,
         "total_episodes": sum(s.get("episode_count", 0) for s in seasons) if media_type == "tv" else None,
+        "dubs": dubs,
         "stream_url": f"/download/tmdb/{tmdb_id}?type={media_type}&season=1&episode=1"
     }
     _cache_set(cache_key, result, DETAILS_TTL)
@@ -2256,6 +2296,7 @@ async def get_tmdb_direct_stream(
         "total_seasons": (tmdb_info or {}).get("total_seasons") if is_series else None,
         "total_episodes": (tmdb_info or {}).get("total_episodes") if is_series else None,
         "seasons": (tmdb_info or {}).get("seasons") if is_series else None,
+        "dubs": (tmdb_info or {}).get("dubs", []),
         "has_resource": has_res,
         "qualities_count": len(files),
         "files": files,
