@@ -1448,6 +1448,7 @@ async def get_download_links(
     
     Uses high-speed Net27 engine (1080p/720p/480p/360p direct CDN MP4s) with Netfilm fallback.
     """
+    t_start = time.perf_counter()
     season_val = max(int(season or 0), int(se or 0))
     episode_val = max(int(episode or 0), int(ep or 0))
 
@@ -1455,7 +1456,8 @@ async def get_download_links(
     slug_cache_key = f"download:{detail_path}:{season_val}:{episode_val}"
     cached = _cache_get(slug_cache_key)
     if cached is not None:
-        return {**cached, "cached": True}
+        dur = round((time.perf_counter() - t_start) * 1000, 2)
+        return {**cached, "cached": True, "execution_time_ms": dur, "duration": f"{dur/1000:.3f}s"}
 
     try:
         candidate = _extract_slug_title(detail_path)
@@ -1492,7 +1494,8 @@ async def get_download_links(
         cache_key = f"download:{subject_id}:{eff_se}:{eff_ep}"
         cached = _cache_get(cache_key)
         if cached is not None:
-            return {**cached, "cached": True}
+            dur = round((time.perf_counter() - t_start) * 1000, 2)
+            return {**cached, "cached": True, "execution_time_ms": dur, "duration": f"{dur/1000:.3f}s"}
 
         # Verify TMDB match against exact subjectType
         resolved_type = tmdb_info.get("media_type")
@@ -1578,9 +1581,14 @@ async def get_download_links(
         subject_type = subject.get("subjectType")
         valid_stream_files = [f for f in files if f.get("stream_link")]
         has_res = len(valid_stream_files) > 0 or has_res
+        dur = round((time.perf_counter() - t_start) * 1000, 2)
+        shaped_seasons = _shape_seasons(details_data) if is_series else None
 
         result = {
             "status": "success",
+            "cached": False,
+            "execution_time_ms": dur,
+            "duration": f"{dur/1000:.3f}s",
             "detail_path": detail_path_slug,
             "subject_id": str(subject_id),
             "tmdb_id": tmdb_info.get("tmdb_id"),
@@ -1592,6 +1600,9 @@ async def get_download_links(
             "subject_type": _SUBJECT_TYPE_NAME.get(subject_type, str(subject_type)),
             "season": eff_se if is_series else None,
             "episode": eff_ep if is_series else None,
+            "total_seasons": len(shaped_seasons) if shaped_seasons else None,
+            "total_episodes": sum(s.get("maxEp", 0) for s in shaped_seasons) if shaped_seasons else None,
+            "seasons": shaped_seasons,
             "release_date": subject.get("releaseDate", ""),
             "cover_image": cover.get("url"),
             "has_resource": has_res,
@@ -1601,7 +1612,6 @@ async def get_download_links(
             "subtitles": captions,
             "hls": hls,
             "dash": dash,
-            "cached": False
         }
         
         # Cache when files are extracted
@@ -2054,6 +2064,7 @@ async def get_tmdb_direct_stream(
     ep: int = 0,
 ):
     """Direct stream extraction via TMDB ID (1080p, 720p, 480p, 360p direct CDN MP4s with MovieBox fallback)."""
+    t_start = time.perf_counter()
     if isinstance(type, str) and type.lower().strip() in ("tv", "series"):
         media_type = "tv"
         explicit_type = True
@@ -2071,7 +2082,8 @@ async def get_tmdb_direct_stream(
     cache_key = f"download_tmdb_direct:{media_type}:{tmdb_id}:{season_val}:{episode_val}"
     cached = _cache_get(cache_key)
     if cached is not None:
-        return {**cached, "cached": True}
+        dur = round((time.perf_counter() - t_start) * 1000, 2)
+        return {**cached, "cached": True, "execution_time_ms": dur, "duration": f"{dur/1000:.3f}s"}
 
     # Parallel fetch streams and TMDB info
     net27_task = _fetch_net27_stream_sources(
@@ -2225,10 +2237,13 @@ async def get_tmdb_direct_stream(
 
     valid_stream_files = [f for f in files if f.get("stream_link")]
     has_res = len(valid_stream_files) > 0 or has_res
+    dur = round((time.perf_counter() - t_start) * 1000, 2)
 
     result = {
         "status": "success",
         "cached": False,
+        "execution_time_ms": dur,
+        "duration": f"{dur/1000:.3f}s",
         "tmdb_id": tmdb_id,
         "media_type": media_type,
         "title": (tmdb_info or {}).get("title", "Unknown"),
@@ -2238,6 +2253,9 @@ async def get_tmdb_direct_stream(
         "poster": (tmdb_info or {}).get("poster"),
         "season": season_val,
         "episode": episode_val,
+        "total_seasons": (tmdb_info or {}).get("total_seasons") if is_series else None,
+        "total_episodes": (tmdb_info or {}).get("total_episodes") if is_series else None,
+        "seasons": (tmdb_info or {}).get("seasons") if is_series else None,
         "has_resource": has_res,
         "qualities_count": len(files),
         "files": files,
