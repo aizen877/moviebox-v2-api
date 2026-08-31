@@ -2167,11 +2167,18 @@ async def get_tmdb_direct_stream(
         dur = round((time.perf_counter() - t_start) * 1000, 2)
         return {**cached, "cached": True, "execution_time_ms": dur, "duration": f"{dur/1000:.3f}s"}
 
+    # Map spin-off TMDB IDs for Net27 (e.g. Bleach S2 Thousand-Year Blood War is TMDB 214999 on Net27)
+    eff_tmdb_id = tmdb_id
+    eff_net27_se = season_val or 1
+    if tmdb_id == 30984 and season_val == 2:
+        eff_tmdb_id = 214999
+        eff_net27_se = 1
+
     # Parallel fetch streams and TMDB info
     net27_task = _fetch_net27_stream_sources(
-        tmdb_id=tmdb_id,
+        tmdb_id=eff_tmdb_id,
         is_series=is_series,
-        se=season_val or 1,
+        se=eff_net27_se,
         ep=episode_val or 1
     )
     tmdb_task = get_tmdb_direct_details(tmdb_id=tmdb_id, type=media_type)
