@@ -975,37 +975,36 @@ async def search(
         raise HTTPException(status_code=502, detail=str(e))
 
 
-def _shape_seasons(details_data: dict) -> dict:
-    """Build a clean season/episode summary from a raw /detail payload."""
+def _shape_seasons(details_data: dict) -> list[dict]:
+    """Build rich seasons array with se, maxEp, allEp, and resolution objects."""
     data = details_data or {}
-    subject = data.get("subject") or {}
-    is_series = subject.get("subjectType") == SubjectType.TV_SERIES.value
     raw_seasons = ((data.get("resource") or {}).get("seasons")) or []
-
     seasons = []
     for s in raw_seasons:
-        resolutions = s.get("resolutions") or []
-        ep_from_res = max((r.get("epNum", 0) or 0 for r in resolutions), default=0)
-        episode_count = ep_from_res or int(s.get("maxEp", 0) or 0)
-        seasons.append(
-            {
-                "season": s.get("se"),
-                "episode_count": episode_count,
-                "resolutions": sorted(
-                    {f"{r.get('resolution')}p" for r in resolutions if r.get("resolution")},
-                    key=lambda x: int(x[:-1]),
-                ),
-            }
-        )
+        raw_res = s.get("resolutions") or []
+        ep_from_res = max((int(r.get("epNum", 0) or 0) for r in raw_res), default=0)
+        max_ep = int(s.get("maxEp", 0) or 0) or ep_from_res
 
-    seasons.sort(key=lambda x: x.get("season") or 0)
-    return {
-        "is_series": is_series,
-        "title": subject.get("title", "Unknown"),
-        "season_count": len(seasons),
-        "total_episodes": sum(s["episode_count"] for s in seasons),
-        "seasons": seasons,
-    }
+        resolutions = []
+        for r in raw_res:
+            resolutions.append({
+                "resolution": int(r.get("resolution", 0) or 0),
+                "epNum": int(r.get("epNum", 0) or max_ep)
+            })
+
+        se_num = int(s.get("se", 1) or 1)
+        seasons.append({
+            "se": se_num,
+            "season": se_num,
+            "season_number": se_num,
+            "maxEp": max_ep,
+            "episode_count": max_ep,
+            "allEp": s.get("allEp", ""),
+            "resolutions": resolutions
+        })
+
+    seasons.sort(key=lambda x: x.get("se") or 0)
+    return seasons
 
 
 def _shape_dubs(details_data: dict) -> list[dict]:
@@ -1420,6 +1419,7 @@ async def get_details(detail_path: str):
             is_series = subject.get("subjectType") == SubjectType.TV_SERIES.value
             tmdb_info = await _resolve_tmdb_info(title, year, is_series)
 
+        shaped_seasons = _shape_seasons(data)
         result = {
             "status": "success",
             "cached": False,
@@ -1430,7 +1430,9 @@ async def get_details(detail_path: str):
             "backdrop": tmdb_info.get("backdrop"),
             "poster": tmdb_info.get("poster"),
             "logos": tmdb_info.get("logos", []),
-            "seasons": _shape_seasons(data),
+            "total_seasons": len(shaped_seasons),
+            "total_episodes": sum(s.get("maxEp", 0) for s in shaped_seasons),
+            "seasons": shaped_seasons,
             "dubs": _shape_dubs(data),
             "data": data,
         }
