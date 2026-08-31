@@ -1106,15 +1106,23 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
     except Exception:
         pass
 
-    # Fetch title logo from TMDB images if TMDB ID resolved
+    # Fetch title logo and cast credits from TMDB if TMDB ID resolved
+    cast_list = []
     if tmdb_id:
         try:
-            img_url = f"https://api.themoviedb.org/3/{resolved_media_type}/{tmdb_id}/images?api_key={TMDB_API_KEY}"
-            r_img = await client.get(img_url, timeout=3.5)
-            if r_img.status_code == 200:
-                img_data = r_img.json()
-                raw_logos = img_data.get("logos", [])
+            extra_url = f"https://api.themoviedb.org/3/{resolved_media_type}/{tmdb_id}?api_key={TMDB_API_KEY}&append_to_response=images,credits"
+            r_extra = await client.get(extra_url, timeout=3.5)
+            if r_extra.status_code == 200:
+                extra_data = r_extra.json()
+                raw_logos = extra_data.get("images", {}).get("logos", [])
                 logo_url, logo_w500 = _pick_best_logo(raw_logos)
+                for c in extra_data.get("credits", {}).get("cast", [])[:15]:
+                    p_path = c.get("profile_path")
+                    cast_list.append({
+                        "name": c.get("name"),
+                        "character": c.get("character"),
+                        "profile_image": f"https://image.tmdb.org/t/p/w185{p_path}" if p_path else None
+                    })
         except Exception:
             pass
 
@@ -1124,7 +1132,8 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
         "logo": logo_url,
         "logo_w500": logo_w500,
         "backdrop": f"https://image.tmdb.org/t/p/original{backdrop_path}" if backdrop_path else None,
-        "poster": f"https://image.tmdb.org/t/p/original{poster_path}" if poster_path else None
+        "poster": f"https://image.tmdb.org/t/p/original{poster_path}" if poster_path else None,
+        "cast": cast_list
     }
     _cache_set(cache_key, res, METADATA_TTL)
     return res
@@ -1435,6 +1444,7 @@ async def get_details(detail_path: str):
             "logo_w500": tmdb_info.get("logo_w500"),
             "backdrop": tmdb_info.get("backdrop"),
             "poster": tmdb_info.get("poster"),
+            "cast": tmdb_info.get("cast", []),
             "total_seasons": len(shaped_seasons) if is_series else None,
             "total_episodes": sum(s.get("maxEp", 0) for s in shaped_seasons) if is_series else None,
             "seasons": shaped_seasons if is_series else None,
