@@ -1407,19 +1407,32 @@ async def get_details(detail_path: str):
             is_series = subject.get("subjectType") == SubjectType.TV_SERIES.value
             tmdb_info = await _resolve_tmdb_info(title, year, is_series)
 
+        subject = (data or {}).get("subject") or {}
+        is_series = subject.get("subjectType") == SubjectType.TV_SERIES.value
+        tmdb_id = tmdb_info.get("tmdb_id")
+
+        episodes = []
+        if is_series and tmdb_id:
+            try:
+                episodes = await _fetch_tmdb_season_episodes(tmdb_id=tmdb_id, season_number=1)
+            except Exception:
+                episodes = []
+
         shaped_seasons = _shape_seasons(data)
         result = {
             "status": "success",
             "cached": False,
             "detail_path": detail_path,
-            "tmdb_id": tmdb_info.get("tmdb_id"),
+            "tmdb_id": tmdb_id,
+            "media_type": "tv" if is_series else "movie",
             "logo": tmdb_info.get("logo"),
             "logo_w500": tmdb_info.get("logo_w500"),
             "backdrop": tmdb_info.get("backdrop"),
             "poster": tmdb_info.get("poster"),
-            "total_seasons": len(shaped_seasons),
-            "total_episodes": sum(s.get("maxEp", 0) for s in shaped_seasons),
-            "seasons": shaped_seasons,
+            "total_seasons": len(shaped_seasons) if is_series else None,
+            "total_episodes": sum(s.get("maxEp", 0) for s in shaped_seasons) if is_series else None,
+            "seasons": shaped_seasons if is_series else None,
+            "episodes": episodes if is_series else None,
             "dubs": _shape_dubs(data),
             "data": data,
         }
