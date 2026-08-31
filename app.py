@@ -1113,10 +1113,27 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
                                 "vote_average": l.get("vote_average"),
                                 "vote_count": l.get("vote_count"),
                             })
-                    # Prioritize the top-rated official full-color logo (ranked #1 by TMDB)
-                    if all_logos:
-                        logo_url = all_logos[0]["url"]
-                        logo_w500 = all_logos[0]["url_w500"]
+                    # Smart English-First Logo Selection
+                    NON_LATIN_LANGS = {"zh", "ja", "ko", "ar", "ru", "hi", "th", "he", "fa", "el", "ta", "te", "bn"}
+                    en_logos = [l for l in all_logos if l.get("lang") == "en"]
+                    picked_logo = None
+
+                    if en_logos:
+                        best_en = sorted(en_logos, key=lambda x: (x.get("vote_average", 0), x.get("vote_count", 0)), reverse=True)[0]
+                        top_global = all_logos[0]
+                        global_lang = top_global.get("lang")
+                        # If top rated global is in latin script and has significantly higher community votes, use it
+                        if global_lang not in NON_LATIN_LANGS and top_global.get("vote_average", 0) > best_en.get("vote_average", 0) + 1.0:
+                            picked_logo = top_global
+                        else:
+                            picked_logo = best_en
+                    elif all_logos:
+                        latin_logos = [l for l in all_logos if l.get("lang") not in NON_LATIN_LANGS]
+                        picked_logo = latin_logos[0] if latin_logos else all_logos[0]
+
+                    if picked_logo:
+                        logo_url = picked_logo["url"]
+                        logo_w500 = picked_logo["url_w500"]
             except Exception:
                 pass
     finally:
@@ -1681,8 +1698,366 @@ async def get_recommendations(
         raise HTTPException(status_code=502, detail=str(e))
 
 
+# ============================================================================
+# TMDB-POWERED NETFLIX-GRADE HOMEPAGE & DIRECT STREAMING ENGINE
+# ============================================================================
+
+HOMEPAGE_TTL = 1800.0  # 30 Minutes
+
+
+def _format_tmdb_card(item: dict, default_type: str = "movie") -> dict:
+    """Format a raw TMDB result into a clean, unified movie/series card."""
+    media_type = item.get("media_type") or default_type
+    is_tv = media_type == "tv"
+    title = item.get("title") or item.get("name") or "Unknown"
+    orig_title = item.get("original_title") or item.get("original_name")
+    poster_path = item.get("poster_path")
+    backdrop_path = item.get("backdrop_path")
+    vote_avg = item.get("vote_average", 0.0)
+    tmdb_id = item.get("id")
+
+    return {
+        "id": tmdb_id,
+        "tmdb_id": tmdb_id,
+        "title": title,
+        "original_title": orig_title,
+        "media_type": media_type,
+        "overview": item.get("overview", ""),
+        "poster": f"https://image.tmdb.org/t/p/original{poster_path}" if poster_path else None,
+        "poster_w500": f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None,
+        "backdrop": f"https://image.tmdb.org/t/p/original{backdrop_path}" if backdrop_path else None,
+        "backdrop_w780": f"https://image.tmdb.org/t/p/w780{backdrop_path}" if backdrop_path else None,
+        "rating": round(vote_avg, 1) if vote_avg else None,
+        "vote_count": item.get("vote_count", 0),
+        "release_date": item.get("release_date") or item.get("first_air_date") or "",
+        "genre_ids": item.get("genre_ids", []),
+        "popularity": item.get("popularity", 0.0),
+        "detail_url": f"/details/tmdb/{tmdb_id}?type={media_type}",
+        "stream_url": f"/download/tmdb/{tmdb_id}?type={media_type}"
+    }
+
+
+@app.get("/api/home")
+@app.get("/homepage")
+@app.get("/tmdb/home")
+async def get_homepage():
+    """Ultra-fast, Netflix-grade homepage powered directly by TMDB real-time data."""
+    cache_key = "tmdb_homepage_payload"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return {**cached, "cached": True}
+
+    client = getattr(app.state, "client", None)
+    should_close = False
+    if client is None:
+        client = httpx.AsyncClient(http2=True, timeout=_TIMEOUT, follow_redirects=True)
+        should_close = True
+
+    try:
+        # Concurrent parallel requests for all homepage sections
+        t_trending_day = client.get(f"https://api.themoviedb.org/3/trending/all/day?api_key={TMDB_API_KEY}", timeout=5.0)
+        t_mov_week = client.get(f"https://api.themoviedb.org/3/trending/movie/week?api_key={TMDB_API_KEY}", timeout=5.0)
+        t_tv_week = client.get(f"https://api.themoviedb.org/3/trending/tv/week?api_key={TMDB_API_KEY}", timeout=5.0)
+        t_anime = client.get(f"https://api.themoviedb.org/3/discover/tv?api_key={TMDB_API_KEY}&with_genres=16&sort_by=popularity.desc", timeout=5.0)
+        t_kdrama = client.get(f"https://api.themoviedb.org/3/discover/tv?api_key={TMDB_API_KEY}&with_original_language=ko&sort_by=popularity.desc", timeout=5.0)
+        t_action = client.get(f"https://api.themoviedb.org/3/discover/movie?api_key={TMDB_API_KEY}&with_genres=28&sort_by=popularity.desc", timeout=5.0)
+        t_top_rated = client.get(f"https://api.themoviedb.org/3/movie/top_rated?api_key={TMDB_API_KEY}", timeout=5.0)
+
+        r_trend, r_mov, r_tv, r_anime, r_kdrama, r_act, r_top = await asyncio.gather(
+            t_trending_day, t_mov_week, t_tv_week, t_anime, t_kdrama, t_action, t_top_rated,
+            return_exceptions=True
+        )
+
+        def _safe_results(r, def_type="movie"):
+            if isinstance(r, httpx.Response) and r.status_code == 200:
+                raw_list = r.json().get("results", [])
+                return [_format_tmdb_card(it, def_type) for it in raw_list]
+            return []
+
+        trending_all = _safe_results(r_trend, "movie")
+        trending_movies = _safe_results(r_mov, "movie")
+        trending_tv = _safe_results(r_tv, "tv")
+        anime_list = _safe_results(r_anime, "tv")
+        kdrama_list = _safe_results(r_kdrama, "tv")
+        action_list = _safe_results(r_act, "movie")
+        top_rated_list = _safe_results(r_top, "movie")
+
+        # Concurrently enrich Top 6 Hero Banner items with English transparent title logos
+        hero_candidates = trending_all[:6]
+        hero_tasks = [
+            _resolve_tmdb_info(
+                title=item.get("title", ""),
+                year=item.get("release_date", ""),
+                is_series=(item.get("media_type") == "tv")
+            )
+            for item in hero_candidates
+        ]
+        resolved_logos = await asyncio.gather(*hero_tasks, return_exceptions=True)
+
+        hero_banner = []
+        for i, item in enumerate(hero_candidates):
+            logo_url = None
+            logo_w500 = None
+            if i < len(resolved_logos) and isinstance(resolved_logos[i], dict):
+                logo_url = resolved_logos[i].get("logo")
+                logo_w500 = resolved_logos[i].get("logo_w500")
+            hero_banner.append({
+                **item,
+                "logo": logo_url,
+                "logo_w500": logo_w500,
+            })
+
+        sections = [
+            {"id": "trending_movies", "title": "🔥 Trending Movies", "items": trending_movies},
+            {"id": "trending_tv", "title": "📺 Popular TV Shows", "items": trending_tv},
+            {"id": "top_anime", "title": "⚔️ Top Rated Anime", "items": anime_list},
+            {"id": "k_dramas", "title": "🇰🇷 Popular K-Dramas", "items": kdrama_list},
+            {"id": "action_blockbusters", "title": "🍿 Action Blockbusters", "items": action_list},
+            {"id": "top_rated", "title": "⭐ Top Rated Masterpieces", "items": top_rated_list},
+        ]
+
+        result = {
+            "status": "success",
+            "cached": False,
+            "hero_banner": hero_banner,
+            "sections": sections,
+        }
+        _cache_set(cache_key, result, HOMEPAGE_TTL)
+        return result
+    finally:
+        if should_close:
+            await client.aclose()
+
+
+@app.get("/details/tmdb/{tmdb_id}")
+@app.get("/detail/tmdb/{tmdb_id}")
+async def get_tmdb_direct_details(
+    tmdb_id: int,
+    type: str = Query("movie", description="Media type: 'movie' or 'tv'")
+):
+    """Direct TMDB Item Details with official logos, cast, trailer, and stream pre-warming."""
+    media_type = "tv" if type.lower() == "tv" else "movie"
+    cache_key = f"tmdb_details_direct:{media_type}:{tmdb_id}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return {**cached, "cached": True}
+
+    client = getattr(app.state, "client", None)
+    should_close = False
+    if client is None:
+        client = httpx.AsyncClient(http2=True, timeout=_TIMEOUT, follow_redirects=True)
+        should_close = True
+
+    try:
+        # Parallel fetch TMDB details, credits, videos, and images
+        t_main = client.get(f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}?api_key={TMDB_API_KEY}&append_to_response=credits,videos,images,recommendations", timeout=5.0)
+        r_main = await t_main
+        if r_main.status_code != 200:
+            raise HTTPException(status_code=404, detail="TMDB content not found")
+
+        data = r_main.json()
+        title = data.get("title") or data.get("name") or "Unknown"
+        year = data.get("release_date") or data.get("first_air_date") or ""
+        poster_path = data.get("poster_path")
+        backdrop_path = data.get("backdrop_path")
+        vote_avg = data.get("vote_average", 0.0)
+
+        # Smart English-First Logo Extraction
+        raw_logos = data.get("images", {}).get("logos", [])
+        all_logos = []
+        for l in raw_logos:
+            fp = l.get("file_path")
+            if fp:
+                all_logos.append({
+                    "url": f"https://image.tmdb.org/t/p/original{fp}",
+                    "url_w500": f"https://image.tmdb.org/t/p/w500{fp}",
+                    "aspect_ratio": l.get("aspect_ratio"),
+                    "width": l.get("width"),
+                    "height": l.get("height"),
+                    "lang": l.get("iso_639_1"),
+                    "vote_average": l.get("vote_average"),
+                    "vote_count": l.get("vote_count"),
+                })
+
+        NON_LATIN_LANGS = {"zh", "ja", "ko", "ar", "ru", "hi", "th", "he", "fa", "el", "ta", "te", "bn"}
+        en_logos = [l for l in all_logos if l.get("lang") == "en"]
+        picked_logo = None
+        if en_logos:
+            best_en = sorted(en_logos, key=lambda x: (x.get("vote_average", 0), x.get("vote_count", 0)), reverse=True)[0]
+            top_global = all_logos[0]
+            global_lang = top_global.get("lang")
+            if global_lang not in NON_LATIN_LANGS and top_global.get("vote_average", 0) > best_en.get("vote_average", 0) + 1.0:
+                picked_logo = top_global
+            else:
+                picked_logo = best_en
+        elif all_logos:
+            latin_logos = [l for l in all_logos if l.get("lang") not in NON_LATIN_LANGS]
+            picked_logo = latin_logos[0] if latin_logos else all_logos[0]
+
+        logo_url = picked_logo["url"] if picked_logo else None
+        logo_w500 = picked_logo["url_w500"] if picked_logo else None
+
+        # Extract YouTube Trailer
+        trailer_url = None
+        for v in data.get("videos", {}).get("results", []):
+            if v.get("site") == "YouTube" and v.get("type") in ("Trailer", "Teaser"):
+                trailer_url = f"https://www.youtube.com/watch?v={v.get('key')}"
+                break
+
+        # Cast formatting
+        cast_list = []
+        for c in data.get("credits", {}).get("cast", [])[:10]:
+            p_path = c.get("profile_path")
+            cast_list.append({
+                "name": c.get("name"),
+                "character": c.get("character"),
+                "profile_image": f"https://image.tmdb.org/t/p/w185{p_path}" if p_path else None
+            })
+
+        # Seasons shaping for TV
+        seasons = []
+        if media_type == "tv":
+            for s in data.get("seasons", []):
+                s_num = s.get("season_number")
+                if s_num is not None and s_num > 0:
+                    seasons.append({
+                        "season_number": s_num,
+                        "name": s.get("name"),
+                        "episode_count": s.get("episode_count", 0),
+                        "poster": f"https://image.tmdb.org/t/p/w500{s.get('poster_path')}" if s.get("poster_path") else None
+                    })
+
+        result = {
+            "status": "success",
+            "cached": False,
+            "tmdb_id": tmdb_id,
+            "media_type": media_type,
+            "title": title,
+            "original_title": data.get("original_title") or data.get("original_name"),
+            "tagline": data.get("tagline", ""),
+            "overview": data.get("overview", ""),
+            "logo": logo_url,
+            "logo_w500": logo_w500,
+            "backdrop": f"https://image.tmdb.org/t/p/original{backdrop_path}" if backdrop_path else None,
+            "poster": f"https://image.tmdb.org/t/p/original{poster_path}" if poster_path else None,
+            "rating": round(vote_avg, 1) if vote_avg else None,
+            "vote_count": data.get("vote_count", 0),
+            "release_date": year,
+            "runtime_minutes": data.get("runtime") or (data.get("episode_run_time", [None])[0] if data.get("episode_run_time") else None),
+            "genres": [g.get("name") for g in data.get("genres", [])],
+            "trailer": trailer_url,
+            "cast": cast_list,
+            "seasons": seasons if media_type == "tv" else None,
+            "stream_url": f"/download/tmdb/{tmdb_id}?type={media_type}&season=1&episode=1"
+        }
+        _cache_set(cache_key, result, DETAILS_TTL)
+
+        # Predictive background pre-warming of streams
+        asyncio.create_task(_fetch_net27_stream_sources(tmdb_id=tmdb_id, is_series=(media_type == "tv"), se=1, ep=1))
+
+        return result
+    finally:
+        if should_close:
+            await client.aclose()
+
+
+@app.get("/download/tmdb/{tmdb_id}")
+async def get_tmdb_direct_stream(
+    tmdb_id: int,
+    type: str = Query("movie", description="Media type: 'movie' or 'tv'"),
+    season: int = 1,
+    episode: int = 1,
+    se: int = 0,
+    ep: int = 0,
+):
+    """Direct stream extraction via TMDB ID (1080p, 720p, 480p, 360p direct CDN MP4s)."""
+    media_type = "tv" if type.lower() == "tv" else "movie"
+    is_series = media_type == "tv"
+    season_val = max(int(season or 1), int(se or 1)) if is_series else None
+    episode_val = max(int(episode or 1), int(ep or 1)) if is_series else None
+
+    cache_key = f"download_tmdb_direct:{media_type}:{tmdb_id}:{season_val}:{episode_val}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return {**cached, "cached": True}
+
+    # Parallel fetch streams and TMDB info
+    net27_task = _fetch_net27_stream_sources(
+        tmdb_id=tmdb_id,
+        is_series=is_series,
+        se=season_val or 1,
+        ep=episode_val or 1
+    )
+    tmdb_task = get_tmdb_direct_details(tmdb_id=tmdb_id, type=media_type)
+
+    net27_data, tmdb_info = await asyncio.gather(net27_task, tmdb_task, return_exceptions=True)
+    if isinstance(tmdb_info, Exception):
+        tmdb_info = {}
+
+    files = []
+    captions = []
+    has_res = False
+
+    if isinstance(net27_data, dict) and net27_data.get("streams"):
+        has_res = True
+        for s in net27_data.get("streams", []):
+            url = s.get("url") or ""
+            if not url:
+                continue
+            res_val = s.get("resolution")
+            size_b = int(s.get("size", 0) or 0)
+            files.append({
+                "resolution": f"{res_val}p" if res_val else "unknown",
+                "resolution_value": int(res_val) if str(res_val).isdigit() else 0,
+                "size_bytes": size_b,
+                "size_mb": round(size_b / (1024 * 1024), 2),
+                "ext": "mp4",
+                "id": str(s.get("id", "")),
+                "stream_link": url,
+                "codec": s.get("codec") or "h264",
+                "vip_locked": False
+            })
+        files.sort(key=lambda x: x.get("resolution_value", 0), reverse=True)
+
+        for c in net27_data.get("captions", []):
+            c_url = c.get("url") or ""
+            if "url=" in c_url:
+                c_url = c_url.split("url=", 1)[-1]
+                c_url = unquote(c_url)
+            captions.append({
+                "language": c.get("name") or c.get("lang"),
+                "language_code": c.get("lang"),
+                "url": c_url,
+            })
+
+    result = {
+        "status": "success",
+        "cached": False,
+        "tmdb_id": tmdb_id,
+        "media_type": media_type,
+        "title": (tmdb_info or {}).get("title", "Unknown"),
+        "logo": (tmdb_info or {}).get("logo"),
+        "logo_w500": (tmdb_info or {}).get("logo_w500"),
+        "backdrop": (tmdb_info or {}).get("backdrop"),
+        "poster": (tmdb_info or {}).get("poster"),
+        "season": season_val,
+        "episode": episode_val,
+        "has_resource": has_res,
+        "qualities_count": len(files),
+        "files": files,
+        "subtitles": captions,
+    }
+    if has_res:
+        _cache_set(cache_key, result, DETAILS_TTL)
+        if is_series and episode_val:
+            asyncio.create_task(_fetch_net27_stream_sources(tmdb_id=tmdb_id, is_series=True, se=season_val or 1, ep=episode_val + 1))
+
+    return result
+
+
 if __name__ == "__main__":
     import os
     import uvicorn
 
     uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", "7860")), reload=True)
+
