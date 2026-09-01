@@ -1512,6 +1512,7 @@ async def get_download_links(
     episode: int = 0,
     se: int = 0,
     ep: int = 0,
+    dub: str | None = Query(None, description="Optional dub ID or language code"),
 ):
     """All available stream / download links + subtitles + logo in a single request.
     
@@ -1594,7 +1595,8 @@ async def get_download_links(
                 ep=eff_ep,
                 subject_id=subject_id,
                 detail_path=detail_path_slug,
-                dubs=raw_dubs
+                dubs=raw_dubs,
+                dub=str(dub).strip() if dub else ""
             )
             if net27_data and net27_data.get("streams"):
                 has_res = True
@@ -2021,7 +2023,7 @@ async def _resolve_moviebox_dubs(
                 top_sid = str(res_data.get("subjectId") or "")
                 for d in res_data.get("dubs", []):
                     sid = str(d.get("subjectId") or "")
-                    dp = d.get("detailPath") or (f"dub-{sid}" if sid else top_dp)
+                    dp = d.get("detailPath") or sid or top_dp
                     lan_name = d.get("lanName") or "Original Audio"
                     lan_code = d.get("lanCode") or "en"
                     if lan_name not in seen_dp:
