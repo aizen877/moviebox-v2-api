@@ -18,18 +18,22 @@ from enum import Enum
 from urllib.parse import quote, unquote
 
 import httpx
-import orjson
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 
+try:
+    import orjson
 
-class FastJSONResponse(Response):
-    media_type = "application/json"
+    class FastJSONResponse(Response):
+        media_type = "application/json"
 
-    def render(self, content: any) -> bytes:
-        return orjson.dumps(content, option=orjson.OPT_NON_STR_KEYS)
+        def render(self, content: any) -> bytes:
+            return orjson.dumps(content, option=orjson.OPT_NON_STR_KEYS)
+except ImportError:
+    class FastJSONResponse(JSONResponse):
+        pass
 
 class SubjectType(int, Enum):
     ALL = 0
@@ -176,15 +180,40 @@ _GLOBAL_CLIENT: httpx.AsyncClient | None = None
 
 
 def _get_client() -> httpx.AsyncClient:
-    """Return the shared high-throughput persistent HTTP/2 connection pool."""
+    """Return the shared high-throughput persistent HTTP/2 connection pool with loop safety."""
     global _GLOBAL_CLIENT
+    recreate = False
     if _GLOBAL_CLIENT is None or _GLOBAL_CLIENT.is_closed:
-        _GLOBAL_CLIENT = httpx.AsyncClient(
-            http2=True,
-            limits=_LIMITS,
-            timeout=_TIMEOUT,
-            follow_redirects=True
-        )
+        recreate = True
+    else:
+        try:
+            curr_loop = asyncio.get_running_loop()
+            saved_loop = getattr(_GLOBAL_CLIENT, "_loop_ref", None)
+            if saved_loop is not None and (saved_loop.is_closed() or saved_loop is not curr_loop):
+                recreate = True
+        except Exception:
+            pass
+
+    if recreate:
+        try:
+            _GLOBAL_CLIENT = httpx.AsyncClient(
+                http2=True,
+                limits=_LIMITS,
+                timeout=_TIMEOUT,
+                follow_redirects=True
+            )
+        except Exception:
+            _GLOBAL_CLIENT = httpx.AsyncClient(
+                http2=False,
+                limits=_LIMITS,
+                timeout=_TIMEOUT,
+                follow_redirects=True
+            )
+        try:
+            _GLOBAL_CLIENT._loop_ref = asyncio.get_running_loop()
+        except Exception:
+            pass
+
     return _GLOBAL_CLIENT
 
 
@@ -221,15 +250,31 @@ async def _get_bearer_token(force_refresh: bool = False) -> str:
     return _bearer_token or ""
 
 
+async def _background_cache_warmer():
+    """Background cache pre-warmer: keeps homepage hot with zero cold starts."""
+    # Initial quick warm-up
+    await asyncio.sleep(0.5)
+    while True:
+        try:
+            logger.info("Pre-warming MovieBox homepage cache in background...")
+            await get_moviebox_home()
+        except Exception as e:
+            logger.warning(f"Background cache warm-up notice: {e}")
+        # Refresh every 15 minutes before 30-minute TTL expires
+        await asyncio.sleep(900)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     client = _get_client()
     app.state.client = client
     logger.info("Shared HTTP/2 httpx connection pool initialized.")
     await _get_bearer_token()
+    warmup_task = asyncio.create_task(_background_cache_warmer())
     try:
         yield
     finally:
+        warmup_task.cancel()
         if _GLOBAL_CLIENT and not _GLOBAL_CLIENT.is_closed:
             await _GLOBAL_CLIENT.aclose()
 
@@ -826,9 +871,12 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/home")
+@app.get("/homepage")
+@app.get("/api/home")
 @app.get("/api/moviebox/home")
-async def get_legacy_moviebox_home():
-    """Legacy MovieBox formatted home feed with banners, movies, series, and animations."""
+async def get_moviebox_home():
+    """MovieBox H5 home feed with banners, movies, series, and animations directly from /wefeed-h5api-bff/home."""
     cache_key = "home:formatted"
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -846,27 +894,33 @@ async def get_legacy_moviebox_home():
                     "poster_url": item.get("image", {}).get("url") or (item.get("subject") or {}).get("cover", {}).get("url"),
                     "slug": item.get("detailPath") or (item.get("subject") or {}).get("detailPath"),
                     "subject_id": (item.get("subject") or {}).get("subjectId"),
-                    "badge": (item.get("subject") or {}).get("corner")
+                    "badge": (item.get("subject") or {}).get("corner"),
+                    "detail_url": f"/details/{item.get('detailPath') or (item.get('subject') or {}).get('detailPath') or (item.get('subject') or {}).get('subjectId')}",
+                    "stream_url": f"/download/{item.get('detailPath') or (item.get('subject') or {}).get('detailPath') or (item.get('subject') or {}).get('subjectId')}"
                 } for item in op.get("banner", {}).get("items", []) if item.get("title") and "Communities" not in item.get("title")]
-                sections.append({"section": "Banner", "count": len(items), "items": items})
-            elif op_type in ["SUBJECTS_MOVIE", "SUBJECTS_TV", "SUBJECTS_ANIMATION"]:
+                if items:
+                    sections.append({"section": "Banner", "count": len(items), "items": items})
+            elif op_type in ["SUBJECTS_MOVIE", "SUBJECTS_TV", "SUBJECTS_ANIMATION", "CUSTOM", "SUBJECTS_SERIES"]:
                 items = [{
                     "name": sub.get("title"),
                     "poster_url": (sub.get("cover") or {}).get("url"),
                     "slug": sub.get("detailPath"),
                     "subject_id": sub.get("subjectId"),
                     "badge": sub.get("corner"),
-                    "rating": sub.get("imdbRatingValue")
+                    "rating": sub.get("imdbRatingValue"),
+                    "detail_url": f"/details/{sub.get('detailPath') or sub.get('subjectId')}",
+                    "stream_url": f"/download/{sub.get('detailPath') or sub.get('subjectId')}"
                 } for sub in op.get("subjects", [])]
-                sections.append({"section": title, "count": len(items), "items": items})
+                if items:
+                    sections.append({"section": title, "count": len(items), "items": items})
 
-        result = {"status": "success", "cached": False, "sections": sections}
+        result = {"status": "success", "cached": False, "sections": sections, "data": data}
         _cache_set(cache_key, result, HOMEPAGE_TTL)
         return result
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error fetching legacy home: {e}")
+        logger.error(f"Error fetching moviebox home: {e}")
         raise HTTPException(status_code=502, detail=str(e))
 
 
@@ -1112,21 +1166,44 @@ def _pick_best_logo(raw_logos: list[dict]) -> tuple[str | None, str | None]:
 def _clean_title(title: str) -> str:
     if not title:
         return ""
+    # Remove bracketed/parenthesized content like [Hindi], (Dubbed), (2024), [Eng Sub]
     t = re.sub(r"\[.*?\]|\(.*?\)", "", title)
+    # Remove Season tags
     t = re.sub(r":?\s*Season\s*\d+(-(Season\s*)?\d+)?", "", t, flags=re.IGNORECASE)
     t = re.sub(r":?\s*S\d+(-S\d+)?", "", t, flags=re.IGNORECASE)
+    # Remove common dub/audio suffixes
+    t = re.sub(r"\b(hindi|english|tamil|telugu|kannada|malayalam|french|spanish|sub|dub|dubbed)\b", "", t, flags=re.IGNORECASE)
     t = re.sub(r"\s+", " ", t)
     return t.strip()
 
 
+def _extract_year_from_title_or_date(title: str, date_or_year: str) -> int | None:
+    if date_or_year:
+        m = re.search(r"\b(19\d\d|20\d\d)\b", str(date_or_year))
+        if m:
+            return int(m.group(1))
+    if title:
+        m = re.search(r"\b(19\d\d|20\d\d)\b", title)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _normalize_title_str(s: str) -> str:
+    s = s.lower().strip()
+    s = re.sub(r"[^\w\s]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
 async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None = None) -> dict:
-    """Ultra-fast cached TMDB ID, Logo, Backdrop & Poster resolver."""
+    """Ultra-fast, high-precision TMDB ID, Logo, Backdrop & Poster resolver matching Title + Year."""
     cleaned = _clean_title(title)
     if not cleaned:
         return {"tmdb_id": None, "logo": None, "logo_w500": None, "backdrop": None, "poster": None}
 
+    year_int = _extract_year_from_title_or_date(title, year)
+    year_str = str(year_int) if year_int else ""
     media_type_key = "tv" if is_series is True else ("movie" if is_series is False else "multi")
-    year_str = str(year)[:4] if year else ""
     cache_key = f"tmdb_meta:{media_type_key}:{cleaned}:{year_str}"
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -1141,62 +1218,89 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
     logo_w500 = None
     resolved_media_type = "tv" if is_series is True else "movie"
 
-    # Fast TMDB Search (search multi or specific type)
     endpoint = "multi" if is_series is None else ("tv" if is_series else "movie")
-    search_url = f"https://api.themoviedb.org/3/search/{endpoint}?api_key={TMDB_API_KEY}&query={quote(cleaned)}"
+
+    # Priority search queries: First try year-filtered TMDB search, then broad search
+    search_queries = []
+    if year_str:
+        if endpoint == "movie":
+            search_queries.append(f"https://api.themoviedb.org/3/search/movie?api_key={TMDB_API_KEY}&query={quote(cleaned)}&primary_release_year={year_str}")
+        elif endpoint == "tv":
+            search_queries.append(f"https://api.themoviedb.org/3/search/tv?api_key={TMDB_API_KEY}&query={quote(cleaned)}&first_air_date_year={year_str}")
+        else:
+            search_queries.append(f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(cleaned)}&year={year_str}")
+
+    search_queries.append(f"https://api.themoviedb.org/3/search/{endpoint}?api_key={TMDB_API_KEY}&query={quote(cleaned)}")
+
     try:
-        r = await client.get(search_url, timeout=3.5)
-        if r.status_code == 200:
-            results = r.json().get("results", [])
-            if results:
-                # 1. Filter candidates by expected media type
-                candidates = []
-                for res in results:
-                    m_type = res.get("media_type") or ("tv" if ("first_air_date" in res or "name" in res) else "movie")
-                    if is_series is True and m_type != "tv":
-                        continue
-                    if is_series is False and m_type != "movie":
-                        continue
-                    candidates.append(res)
-                if not candidates:
-                    candidates = results
+        results = []
+        for sq in search_queries:
+            r = await client.get(sq, timeout=3.5)
+            if r.status_code == 200:
+                raw_res = r.json().get("results", [])
+                if raw_res:
+                    results = raw_res
+                    break
 
-                # 2. Score candidates by exact title match, popularity, vote count, and release year proximity
-                year_int = int(year_str) if year_str.isdigit() else None
-                clean_lower = cleaned.lower().strip()
+        if results:
+            candidates = []
+            for res in results:
+                m_type = res.get("media_type") or ("tv" if ("first_air_date" in res or "name" in res) else "movie")
+                if is_series is True and m_type != "tv":
+                    continue
+                if is_series is False and m_type != "movie":
+                    continue
+                candidates.append(res)
+            if not candidates:
+                candidates = results
 
-                def _score_candidate(c):
-                    c_title = (c.get("name") or c.get("title") or "").lower().strip()
-                    c_rel = c.get("first_air_date") or c.get("release_date") or ""
-                    c_year = int(str(c_rel)[:4]) if str(c_rel)[:4].isdigit() else None
-                    c_pop = float(c.get("popularity", 0.0) or 0.0)
-                    c_votes = int(c.get("vote_count", 0) or 0)
-                    
-                    score = c_pop + (c_votes * 0.1)
-                    
-                    # Exact title bonus
-                    if c_title == clean_lower:
-                        score += 100.0
+            norm_cleaned = _normalize_title_str(cleaned)
 
-                    # Release year proximity bonus/penalty
-                    if year_int and c_year:
-                        diff = abs(c_year - year_int)
-                        if diff <= 2:
-                            score += 80.0
-                        elif diff <= 6:
-                            score += 40.0
-                        elif diff > 10:
-                            score -= 30.0
-                    return score
+            def _score_candidate(c):
+                c_title = c.get("name") or c.get("title") or ""
+                norm_c_title = _normalize_title_str(c_title)
+                c_rel = c.get("first_air_date") or c.get("release_date") or ""
+                c_year = int(str(c_rel)[:4]) if str(c_rel)[:4].isdigit() else None
+                c_pop = float(c.get("popularity", 0.0) or 0.0)
+                c_votes = int(c.get("vote_count", 0) or 0)
 
-                candidates.sort(key=_score_candidate, reverse=True)
-                top = candidates[0]
+                score = 0.0
 
-                tmdb_id = top.get("id")
-                poster_path = top.get("poster_path")
-                backdrop_path = top.get("backdrop_path")
-                if "media_type" in top:
-                    resolved_media_type = top.get("media_type")
+                # 1. Exact title match receives highest base score
+                if norm_c_title == norm_cleaned:
+                    score += 1000.0
+                elif norm_c_title.startswith(norm_cleaned) or norm_cleaned.startswith(norm_c_title):
+                    score += 400.0
+                else:
+                    q_words = set(norm_cleaned.split())
+                    c_words = set(norm_c_title.split())
+                    if q_words and c_words:
+                        overlap = len(q_words & c_words) / max(len(q_words), len(c_words))
+                        score += overlap * 300.0
+
+                # 2. Release year matching is critical (prevents picking wrong decade remakes)
+                if year_int and c_year:
+                    diff = abs(c_year - year_int)
+                    if diff == 0:
+                        score += 800.0
+                    elif diff == 1:
+                        score += 400.0
+                    elif diff == 2:
+                        score += 150.0
+                    elif diff > 3:
+                        score -= 600.0
+
+                # 3. Popularity & vote counts act strictly as minor tie-breakers, never overriding title+year
+                score += min(c_pop, 50.0) * 0.5 + min(c_votes, 1000) * 0.05
+                return score
+
+            candidates.sort(key=_score_candidate, reverse=True)
+            top = candidates[0]
+
+            tmdb_id = top.get("id")
+            poster_path = top.get("poster_path")
+            backdrop_path = top.get("backdrop_path")
+            resolved_media_type = top.get("media_type") or ("tv" if ("first_air_date" in top or "name" in top) else "movie")
     except Exception:
         pass
 
@@ -1280,7 +1384,7 @@ async def _fetch_net27_stream_sources(
     return None
 
 
-_cached_player_domain = "https://netfilm.world"
+_cached_player_domain = "https://officialmoviebox.com"
 _cached_player_domain_exp = 9999999999.0
 
 
@@ -1626,10 +1730,28 @@ async def get_download_links(
         
         # Parallel Step 1: Fetch MovieBox Detail + TMDB Info concurrently
         hint_series = True if (season_val > 0 or episode_val > 0) else None
+        details_data = {}
+        tmdb_info = {}
+
         if candidate:
             task_detail = _fetch_details(detail_path)
             task_tmdb = _resolve_tmdb_info(candidate, is_series=hint_series)
-            details_data, tmdb_info = await asyncio.gather(task_detail, task_tmdb)
+            r_det, r_tmdb = await asyncio.gather(task_detail, task_tmdb, return_exceptions=True)
+            if isinstance(r_det, dict):
+                details_data = r_det
+            if isinstance(r_tmdb, dict):
+                tmdb_info = r_tmdb
+
+            if not details_data and tmdb_info.get("tmdb_id"):
+                return await get_tmdb_direct_stream(
+                    tmdb_id=tmdb_info["tmdb_id"],
+                    type="tv" if tmdb_info.get("media_type") == "tv" else "movie",
+                    season=season_val or 1,
+                    episode=episode_val or 1,
+                    dub=dub if isinstance(dub, str) else ""
+                )
+            if not details_data and isinstance(r_det, Exception):
+                raise r_det
         else:
             try:
                 details_data = await _fetch_details(detail_path)
@@ -1690,8 +1812,38 @@ async def get_download_links(
         dash = []
         has_res = False
 
-        # 2. Try Primary Net27 Engine for full resolutions (360p, 480p, 720p, 1080p)
-        if tmdb_id:
+        # 1. Check if dub is requested for Moviebox
+        target_subject_id = subject_id
+        target_detail_path = detail_path_slug
+        if dub and isinstance(dub, str):
+            dub_clean = dub.lower().strip()
+            for d in raw_dubs:
+                d_name = str(d.get("lanName") or "").lower().strip()
+                d_code = str(d.get("lanCode") or "").lower().strip()
+                d_sid = str(d.get("subjectId") or "")
+                if dub_clean in d_name or dub_clean == d_code or dub_clean == d_sid:
+                    if d.get("subjectId"):
+                        target_subject_id = str(d["subjectId"])
+                    if d.get("detailPath"):
+                        target_detail_path = str(d["detailPath"])
+                    break
+
+        # 2. Fetch direct MovieBox official play streams (1080p, 720p, 480p, 360p all unlocked)
+        mb_streams = await _fetch_moviebox_play_streams(
+            subject_id=target_subject_id,
+            detail_path=target_detail_path,
+            is_series=is_series,
+            se=eff_se,
+            ep=eff_ep
+        )
+        if mb_streams and mb_streams.get("files"):
+            files.extend(mb_streams.get("files", []))
+            captions.extend(mb_streams.get("subtitles", []))
+            hls.extend(mb_streams.get("hls", []))
+            dash.extend(mb_streams.get("dash", []))
+
+        # 3. Fallback to Net27 Engine if MovieBox has no streams
+        if not files and tmdb_id:
             net27_data = await _fetch_net27_stream_sources(
                 tmdb_id=tmdb_id,
                 is_series=is_series,
@@ -1721,10 +1873,8 @@ async def get_download_links(
                         "codec": s.get("codec") or "h264",
                         "vip_locked": False
                     })
-                # Sort files by resolution descending (1080p, 720p, 480p, 360p)
                 files.sort(key=lambda x: x.get("resolution_value", 0), reverse=True)
 
-                # Parse captions from Net27
                 for c in net27_data.get("captions", []):
                     c_url = c.get("url") or ""
                     if "url=" in c_url:
@@ -1740,22 +1890,6 @@ async def get_download_links(
 
                 if net27_data.get("fallbackHls"):
                     hls.append({"url": net27_data.get("fallbackHls"), "format": "HLS"})
-
-        # 3. Fallback to Legacy Netfilm/Moviebox Engine if Net27 has no files
-        if not files:
-            mb_legacy = await _fetch_moviebox_play_streams(
-                subject_id=subject_id,
-                detail_path=detail_path_slug,
-                is_series=is_series,
-                se=eff_se,
-                ep=eff_ep
-            )
-            if mb_legacy:
-                files.extend(mb_legacy.get("files", []))
-                if not captions:
-                    captions.extend(mb_legacy.get("subtitles", []))
-                hls.extend(mb_legacy.get("hls", []))
-                dash.extend(mb_legacy.get("dash", []))
 
         cover = subject.get("cover") or {}
         subject_type = subject.get("subjectType")
@@ -1974,11 +2108,9 @@ def _format_tmdb_card(item: dict, default_type: str = "movie") -> dict:
     }
 
 
-@app.get("/home")
-@app.get("/api/home")
-@app.get("/homepage")
 @app.get("/tmdb/home")
-async def get_homepage():
+@app.get("/api/tmdb/home")
+async def get_tmdb_homepage():
     """Ultra-fast, Netflix-grade homepage powered directly by TMDB real-time data."""
     cache_key = "tmdb_homepage_payload"
     cached = _cache_get(cache_key)
@@ -2015,25 +2147,24 @@ async def get_homepage():
     action_list = _safe_results(r_act, "movie")
     top_rated_list = _safe_results(r_top, "movie")
 
-    # Concurrently enrich Top 6 Hero Banner items with English transparent title logos
+    # Concurrently enrich Top 6 Hero Banner items with English transparent title logos directly by TMDB ID
     hero_candidates = trending_all[:6]
-    hero_tasks = [
-        _resolve_tmdb_info(
-            title=item.get("title", ""),
-            year=item.get("release_date", ""),
-            is_series=(item.get("media_type") == "tv")
+    logo_tasks = [
+        client.get(
+            f"https://api.themoviedb.org/3/{item.get('media_type', 'movie')}/{item.get('id')}/images?api_key={TMDB_API_KEY}",
+            timeout=3.5
         )
         for item in hero_candidates
     ]
-    resolved_logos = await asyncio.gather(*hero_tasks, return_exceptions=True)
+    resolved_logos = await asyncio.gather(*logo_tasks, return_exceptions=True)
 
     hero_banner = []
     for i, item in enumerate(hero_candidates):
         logo_url = None
         logo_w500 = None
-        if i < len(resolved_logos) and isinstance(resolved_logos[i], dict):
-            logo_url = resolved_logos[i].get("logo")
-            logo_w500 = resolved_logos[i].get("logo_w500")
+        if i < len(resolved_logos) and isinstance(resolved_logos[i], httpx.Response) and resolved_logos[i].status_code == 200:
+            raw_logos = resolved_logos[i].json().get("logos", [])
+            logo_url, logo_w500 = _pick_best_logo(raw_logos)
         hero_banner.append({
             **item,
             "logo": logo_url,
