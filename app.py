@@ -51,6 +51,64 @@ BASE = HOST_URL.rstrip("/")
 API_BASE = f"{BASE}/wefeed-h5api-bff"
 REC_BASE = "https://h5.aoneroom.com"
 
+# Registry for internal / proxy dub subject IDs (e.g. Net27 dub IDs like 8341378781361456976)
+_DUB_REGISTRY: dict[str, dict] = {
+    "8341378781361456976": {
+        "tmdb_id": 1339713,
+        "is_series": False,
+        "parent_sid": "1732378050823619144",
+        "detail_path": "obsession-YCQTo4djY32",
+        "dub_id": "8341378781361456976",
+        "language_name": "Hindi dub",
+        "title": "Obsession"
+    },
+    "828897044420091464": {
+        "tmdb_id": 1339713,
+        "is_series": False,
+        "parent_sid": "1732378050823619144",
+        "detail_path": "obsession-YCQTo4djY32",
+        "dub_id": "828897044420091464",
+        "language_name": "French dub",
+        "title": "Obsession"
+    },
+    "5312141035068342520": {
+        "tmdb_id": 1339713,
+        "is_series": False,
+        "parent_sid": "1732378050823619144",
+        "detail_path": "obsession-YCQTo4djY32",
+        "dub_id": "5312141035068342520",
+        "language_name": "Spanish dub",
+        "title": "Obsession"
+    },
+    "4600169151133535256": {
+        "tmdb_id": 1339713,
+        "is_series": False,
+        "parent_sid": "1732378050823619144",
+        "detail_path": "obsession-YCQTo4djY32",
+        "dub_id": "4600169151133535256",
+        "language_name": "Arabic sub",
+        "title": "Obsession"
+    },
+    "6160785100553737680": {
+        "tmdb_id": 1339713,
+        "is_series": False,
+        "parent_sid": "1732378050823619144",
+        "detail_path": "obsession-YCQTo4djY32",
+        "dub_id": "6160785100553737680",
+        "language_name": "esla dub",
+        "title": "Obsession"
+    },
+    "6346384432848847160": {
+        "tmdb_id": 1339713,
+        "is_series": False,
+        "parent_sid": "1732378050823619144",
+        "detail_path": "obsession-YCQTo4djY32",
+        "dub_id": "6346384432848847160",
+        "language_name": "ptbr dub",
+        "title": "Obsession"
+    }
+}
+
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
     "Referer": "https://moviebox.ph/",
@@ -1443,13 +1501,33 @@ async def get_details(detail_path: str):
     try:
         candidate = _extract_slug_title(detail_path)
         
+        # Check if detail_path is a known dub_meta entry
+        dub_meta = _DUB_REGISTRY.get(detail_path) or _cache_get(f"dub_meta:{detail_path}")
+        if not candidate and dub_meta:
+            eff_tmdb_id = dub_meta.get("tmdb_id")
+            eff_is_series = dub_meta.get("is_series", False)
+            if eff_tmdb_id:
+                return await get_tmdb_direct_details(
+                    tmdb_id=eff_tmdb_id,
+                    type="tv" if eff_is_series else "movie"
+                )
+
         # Parallel Step: Fetch MovieBox Detail + TMDB Info simultaneously
         if candidate:
             task_detail = _fetch_details(detail_path)
             task_tmdb = _resolve_tmdb_info(candidate)
             data, tmdb_info = await asyncio.gather(task_detail, task_tmdb)
         else:
-            data = await _fetch_details(detail_path)
+            try:
+                data = await _fetch_details(detail_path)
+            except Exception:
+                dub_meta = _DUB_REGISTRY.get(detail_path) or _cache_get(f"dub_meta:{detail_path}")
+                if dub_meta and dub_meta.get("tmdb_id"):
+                    return await get_tmdb_direct_details(
+                        tmdb_id=dub_meta["tmdb_id"],
+                        type="tv" if dub_meta.get("is_series") else "movie"
+                    )
+                raise
             subject = (data or {}).get("subject") or {}
             title = subject.get("title", "")
             slug = subject.get("detailPath", "")
@@ -1531,6 +1609,20 @@ async def get_download_links(
 
     try:
         candidate = _extract_slug_title(detail_path)
+
+        # Fast registry / cache check for known dub IDs (e.g. 8341378781361456976)
+        dub_meta = _DUB_REGISTRY.get(detail_path) or _cache_get(f"dub_meta:{detail_path}")
+        if not candidate and dub_meta:
+            eff_tmdb_id = dub_meta.get("tmdb_id")
+            eff_is_series = dub_meta.get("is_series", False)
+            eff_dub_id = dub_meta.get("dub_id") or detail_path
+            return await get_tmdb_direct_stream(
+                tmdb_id=eff_tmdb_id,
+                type="tv" if eff_is_series else "movie",
+                season=season_val or 1,
+                episode=episode_val or 1,
+                dub=eff_dub_id
+            )
         
         # Parallel Step 1: Fetch MovieBox Detail + TMDB Info concurrently
         hint_series = True if (season_val > 0 or episode_val > 0) else None
@@ -1539,7 +1631,19 @@ async def get_download_links(
             task_tmdb = _resolve_tmdb_info(candidate, is_series=hint_series)
             details_data, tmdb_info = await asyncio.gather(task_detail, task_tmdb)
         else:
-            details_data = await _fetch_details(detail_path)
+            try:
+                details_data = await _fetch_details(detail_path)
+            except Exception:
+                dub_meta = _DUB_REGISTRY.get(detail_path) or _cache_get(f"dub_meta:{detail_path}")
+                if dub_meta and dub_meta.get("tmdb_id"):
+                    return await get_tmdb_direct_stream(
+                        tmdb_id=dub_meta["tmdb_id"],
+                        type="tv" if dub_meta.get("is_series") else "movie",
+                        season=season_val or 1,
+                        episode=episode_val or 1,
+                        dub=dub_meta.get("dub_id") or detail_path
+                    )
+                raise
             subject = (details_data or {}).get("subject") or {}
             title = subject.get("title", "Unknown")
             slug = subject.get("detailPath", "")
@@ -2035,6 +2139,18 @@ async def _resolve_moviebox_dubs(
                             "language_code": lan_code,
                             "is_original": bool(d.get("isOriginal", False) or lan_name == "Original Audio")
                         })
+                    if sid:
+                        meta = {
+                            "tmdb_id": tmdb_id,
+                            "is_series": is_series,
+                            "parent_sid": top_sid,
+                            "detail_path": top_dp,
+                            "dub_id": sid,
+                            "language_name": lan_name,
+                            "title": title
+                        }
+                        _DUB_REGISTRY[sid] = meta
+                        _cache_set(f"dub_meta:{sid}", meta, DETAILS_TTL * 4)
                 if dubs:
                     _cache_set(cache_key, dubs, DETAILS_TTL)
                     return dubs
