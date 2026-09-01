@@ -1397,6 +1397,28 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
         except Exception:
             pass
 
+    tmdb_seasons = []
+    if tmdb_id and resolved_media_type == "tv":
+        try:
+            for s in extra_data.get("seasons", []):
+                s_num = s.get("season_number")
+                if s_num == 0:
+                    continue
+                poster_p = s.get("poster_path")
+                tmdb_seasons.append({
+                    "se": s_num,
+                    "season": s_num,
+                    "season_number": s_num,
+                    "name": s.get("name") or f"Season {s_num}",
+                    "overview": s.get("overview", ""),
+                    "maxEp": s.get("episode_count", 0),
+                    "episode_count": s.get("episode_count", 0),
+                    "air_date": s.get("air_date", ""),
+                    "poster": f"https://image.tmdb.org/t/p/original{poster_p}" if poster_p else None
+                })
+        except Exception:
+            pass
+
     res = {
         "tmdb_id": tmdb_id,
         "media_type": resolved_media_type,
@@ -1406,6 +1428,7 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
         "status": status_text,
         "directors": directors_list,
         "writers": writers_list,
+        "seasons": tmdb_seasons,
         "rating": rating or (round(float(top.get("vote_average", 0.0)), 1) if (top and top.get("vote_average")) else None),
         "genres": genres,
         "release_date": release_date or (top.get("release_date") or top.get("first_air_date") if top else None),
@@ -1678,9 +1701,17 @@ async def _background_prefetch_next_ep(detail_path: str, season: int, episode: i
 
 @app.get("/details/{detail_path}")
 @app.get("/detail/{detail_path}")
-async def get_details(detail_path: str):
-    """Specific item details with TMDB ID & Title Logo (cached 10 min)."""
-    cache_key = f"details_resp:{detail_path}"
+async def get_details(
+    detail_path: str,
+    season: int = Query(1, ge=1, description="Season number for TV shows"),
+    se: int | None = Query(None, description="Alias for season")
+):
+    """Specific item details with TMDB ID & Title Logo & All TV Seasons/Episodes."""
+    try:
+        target_season = int(se) if (se is not None and str(se).isdigit()) else (int(season) if str(season).isdigit() else 1)
+    except Exception:
+        target_season = 1
+    cache_key = f"details_resp:{detail_path}:{target_season}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return {**cached, "cached": True}
@@ -1712,11 +1743,20 @@ async def get_details(detail_path: str):
         episodes = []
         if is_series and tmdb_id:
             try:
-                episodes = await _fetch_tmdb_season_episodes(tmdb_id=tmdb_id, season_number=1)
+                episodes = await _fetch_tmdb_season_episodes(tmdb_id=tmdb_id, season_number=target_season)
+                for ep in episodes:
+                    ep_num = ep.get("episode_number", 1)
+                    ep["stream_url"] = f"/download/{detail_path}?season={target_season}&episode={ep_num}"
             except Exception:
                 episodes = []
 
         shaped_seasons = _shape_seasons(data)
+        tmdb_seasons = tmdb_info.get("seasons") or []
+        final_seasons = tmdb_seasons if tmdb_seasons else shaped_seasons
+
+        total_seasons = len(final_seasons) if is_series else None
+        total_episodes = sum(s.get("maxEp", 0) or s.get("episode_count", 0) for s in final_seasons) if is_series else None
+
         mb_desc = subject.get("description") or ""
         tmdb_overview = tmdb_info.get("overview") or ""
         final_overview = tmdb_overview if tmdb_overview else mb_desc
@@ -1728,6 +1768,8 @@ async def get_details(detail_path: str):
             "title": subject.get("title") or title,
             "tmdb_id": tmdb_id,
             "media_type": "tv" if is_series else "movie",
+            "season": target_season if is_series else None,
+            "season_number": target_season if is_series else None,
             "tagline": tmdb_info.get("tagline"),
             "runtime": tmdb_info.get("runtime") or subject.get("duration"),
             "directors": tmdb_info.get("directors", []),
@@ -1742,9 +1784,9 @@ async def get_details(detail_path: str):
             "backdrop": tmdb_info.get("backdrop"),
             "poster": tmdb_info.get("poster") or (subject.get("cover") or {}).get("url"),
             "cast": tmdb_info.get("cast", []),
-            "total_seasons": len(shaped_seasons) if is_series else None,
-            "total_episodes": sum(s.get("maxEp", 0) for s in shaped_seasons) if is_series else None,
-            "seasons": shaped_seasons if is_series else None,
+            "total_seasons": total_seasons,
+            "total_episodes": total_episodes,
+            "seasons": final_seasons if is_series else None,
             "episodes": episodes if is_series else None,
             "dubs": _shape_dubs(data),
             "data": data,
@@ -1752,7 +1794,7 @@ async def get_details(detail_path: str):
         _cache_set(cache_key, result, DETAILS_TTL)
         
         # Predictive background stream pre-warm: Fetch streams while user is reading details
-        asyncio.create_task(_background_prefetch_next_ep(detail_path, 1, 1))
+        asyncio.create_task(_background_prefetch_next_ep(detail_path, target_season or 1, 1))
 
         return result
     except HTTPException:
@@ -1760,6 +1802,31 @@ async def get_details(detail_path: str):
     except Exception as e:
         logger.error(f"Error fetching details for '{detail_path}': {e}")
         raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.get("/details/{detail_path}/season/{season_number}")
+@app.get("/detail/{detail_path}/season/{season_number}")
+@app.get("/season/{detail_path}/{season_number}")
+@app.get("/season/{detail_path}")
+async def get_item_season_episodes(
+    detail_path: str,
+    season_number: int = 1,
+    season: int | None = None
+):
+    """Fetch complete list of episodes with thumbnails and stream URLs for any specific TV season."""
+    target_season = season if season is not None else season_number
+    details = await get_details(detail_path=detail_path, season=target_season)
+    return {
+        "status": "success",
+        "detail_path": detail_path,
+        "title": details.get("title"),
+        "tmdb_id": details.get("tmdb_id"),
+        "season": target_season,
+        "season_number": target_season,
+        "total_episodes": len(details.get("episodes", []) or []),
+        "episodes": details.get("episodes", []),
+        "seasons": details.get("seasons", [])
+    }
 
 
 @app.get("/download/{detail_path}")
