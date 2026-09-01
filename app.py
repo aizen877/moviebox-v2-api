@@ -1958,8 +1958,32 @@ async def get_homepage():
     return result
 
 
+STOP_WORDS = {"the", "a", "an", "of", "in", "on", "at", "to", "for", "and", "or", "is", "it", "part", "season", "s1", "s2", "s3", "s4", "s5", "s6"}
+
+def _is_title_match(query_title: str, candidate_title: str) -> bool:
+    """Strictly verify if candidate title matches query title, ignoring season tags, dub tags, and stop words."""
+    c_query = _clean_title(query_title).lower().strip()
+    c_cand = _clean_title(candidate_title).lower().strip()
+    if not c_query or not c_cand:
+        return False
+    if c_query == c_cand:
+        return True
+        
+    norm_q = re.sub(r"[^\w\s]", " ", c_query).strip()
+    norm_cand = re.sub(r"[^\w\s]", " ", c_cand).strip()
+    if norm_q == norm_cand:
+        return True
+
+    q_tokens = [w for w in norm_q.split() if w not in STOP_WORDS]
+    cand_tokens = [w for w in norm_cand.split() if w not in STOP_WORDS]
+    if not q_tokens or not cand_tokens:
+        return norm_q == norm_cand
+
+    return q_tokens == cand_tokens
+
+
 async def _resolve_moviebox_dubs(title: str, tmdb_id: int | None = None, is_series: bool = True) -> list[dict]:
-    """Fetch and cache available dubs/languages from MovieBox for a given title/TMDB ID."""
+    """Fetch and cache available dubs/languages from MovieBox strictly for the matching title."""
     clean = _clean_title(title)
     if not clean:
         return []
@@ -1980,32 +2004,20 @@ async def _resolve_moviebox_dubs(title: str, tmdb_id: int | None = None, is_seri
         items = (res or {}).get("items", []) if isinstance(res, dict) else []
         target_type = SubjectType.TV_SERIES.value if is_series else SubjectType.MOVIES.value
         
-        # Match candidates with title relevance and matching media type
-        clean_words = set(re.findall(r"\w+", clean.lower()))
+        # Strict matching: candidate must match media type and have matching title tokens
         matching_items = []
-
         for it in items:
             sub = it.get("subject", it)
-            it_title = str(sub.get("title") or "").lower()
+            it_title = str(sub.get("title") or "")
             it_type = sub.get("subjectType")
             
-            # Media type check
             if it_type != target_type:
                 continue
             
-            # Title relevance check: must share words with the title
-            it_words = set(re.findall(r"\w+", it_title))
-            if clean_words & it_words:
+            if _is_title_match(clean, it_title):
                 matching_items.append(sub)
 
-        if not matching_items and items:
-            for it in items:
-                sub = it.get("subject", it)
-                dp = str(sub.get("detailPath") or "").lower()
-                if any(w in dp for w in clean_words if len(w) > 2):
-                    matching_items.append(sub)
-
-        for match in matching_items[:3]:
+        for match in matching_items:
             top_dp = match.get("detailPath")
             if top_dp:
                 d_data = await _fetch_details(top_dp)
