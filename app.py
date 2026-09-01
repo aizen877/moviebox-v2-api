@@ -2016,10 +2016,13 @@ async def _resolve_moviebox_dubs(
             if res_data.get("ok") and res_data.get("dubs"):
                 for d in res_data.get("dubs", []):
                     sid = str(d.get("subjectId") or "")
-                    dp = d.get("detailPath") or sid
+                    dp = d.get("detailPath")
+                    # Only accept real published dubs with a valid MovieBox detailPath
+                    if not dp:
+                        continue
                     lan_name = d.get("lanName") or "Original Audio"
                     lan_code = d.get("lanCode") or "en"
-                    if dp and lan_name not in seen_dp:
+                    if lan_name not in seen_dp:
                         seen_dp.add(lan_name)
                         dubs.append({
                             "subject_id": sid,
