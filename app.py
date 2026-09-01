@@ -1212,7 +1212,7 @@ async def _fetch_net27_stream_sources(
 
     client = _get_client()
     try:
-        resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=4.5)
+        resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10.0)
         if resp.status_code == 200:
             data = resp.json()
             if data.get("ok") and data.get("streams"):
