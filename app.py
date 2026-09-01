@@ -1091,8 +1091,11 @@ async def search(
         
         items = [{
             "name": sub.get("title"),
+            "title": sub.get("title"),
             "poster_url": (sub.get("cover") or {}).get("url"),
             "slug": sub.get("detailPath"),
+            "detail_path": sub.get("detailPath"),
+            "detailPath": sub.get("detailPath"),
             "subject_id": sub.get("subjectId"),
             "subject_type": sub.get("subjectType"),
             "rating": sub.get("imdbRatingValue"),
