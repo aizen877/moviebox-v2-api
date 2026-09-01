@@ -1258,8 +1258,10 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
 
     endpoint = "multi" if is_series is None else ("tv" if is_series else "movie")
 
-    # Priority search queries: First try year-filtered TMDB search, then broad search
-    search_queries = []
+    # Standard search query (preserves exact title matches without regional dub date filtering)
+    search_queries = [
+        f"https://api.themoviedb.org/3/search/{endpoint}?api_key={TMDB_API_KEY}&query={quote(cleaned)}"
+    ]
     if year_str:
         if endpoint == "movie":
             search_queries.append(f"https://api.themoviedb.org/3/search/movie?api_key={TMDB_API_KEY}&query={quote(cleaned)}&primary_release_year={year_str}")
@@ -1267,8 +1269,6 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
             search_queries.append(f"https://api.themoviedb.org/3/search/tv?api_key={TMDB_API_KEY}&query={quote(cleaned)}&first_air_date_year={year_str}")
         else:
             search_queries.append(f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={quote(cleaned)}&year={year_str}")
-
-    search_queries.append(f"https://api.themoviedb.org/3/search/{endpoint}?api_key={TMDB_API_KEY}&query={quote(cleaned)}")
 
     try:
         results = []
@@ -1304,31 +1304,39 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
 
                 score = 0.0
 
-                # 1. Exact title match receives highest base score
-                if norm_c_title == norm_cleaned:
-                    score += 1000.0
-                elif norm_c_title.startswith(norm_cleaned) or norm_cleaned.startswith(norm_c_title):
-                    score += 400.0
-                else:
-                    q_words = set(norm_cleaned.split())
-                    c_words = set(norm_c_title.split())
-                    if q_words and c_words:
-                        overlap = len(q_words & c_words) / max(len(q_words), len(c_words))
-                        score += overlap * 300.0
+                q_words = norm_cleaned.split()
+                c_words = norm_c_title.split()
 
-                # 2. Release year matching is critical (prevents picking wrong decade remakes)
+                # 1. Exact Title Matching (Dominant Factor)
+                if norm_c_title == norm_cleaned:
+                    score += 2000.0
+                elif norm_c_title.startswith(norm_cleaned):
+                    extra_word_count = len(c_words) - len(q_words)
+                    score += max(100.0, 600.0 - (extra_word_count * 250.0))
+                elif norm_cleaned.startswith(norm_c_title):
+                    extra_word_count = len(q_words) - len(c_words)
+                    score += max(100.0, 600.0 - (extra_word_count * 250.0))
+                else:
+                    q_set, c_set = set(q_words), set(c_words)
+                    if q_set and c_set:
+                        overlap = len(q_set & c_set) / max(len(q_set), len(c_set))
+                        score += overlap * 400.0
+
+                # 2. Release Year Factor
                 if year_int and c_year:
                     diff = abs(c_year - year_int)
                     if diff == 0:
                         score += 800.0
                     elif diff == 1:
                         score += 400.0
-                    elif diff == 2:
+                    elif diff <= 3:
                         score += 150.0
-                    elif diff > 3:
-                        score -= 600.0
+                    elif diff <= 6:
+                        score -= 100.0
+                    else:
+                        score -= min(800.0, diff * 15.0)
 
-                # 3. Popularity & vote counts act strictly as minor tie-breakers, never overriding title+year
+                # 3. Popularity & vote counts act strictly as minor tie-breakers
                 score += min(c_pop, 50.0) * 0.5 + min(c_votes, 1000) * 0.05
                 return score
 
