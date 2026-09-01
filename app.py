@@ -1091,12 +1091,48 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
         if r.status_code == 200:
             results = r.json().get("results", [])
             if results:
-                if is_series is True:
-                    top = next((res for res in results if res.get("media_type") == "tv"), results[0])
-                elif is_series is False:
-                    top = next((res for res in results if res.get("media_type") == "movie"), results[0])
-                else:
-                    top = results[0]
+                # 1. Filter candidates by expected media type
+                candidates = []
+                for res in results:
+                    m_type = res.get("media_type") or ("tv" if ("first_air_date" in res or "name" in res) else "movie")
+                    if is_series is True and m_type != "tv":
+                        continue
+                    if is_series is False and m_type != "movie":
+                        continue
+                    candidates.append(res)
+                if not candidates:
+                    candidates = results
+
+                # 2. Score candidates by exact title match, popularity, vote count, and release year proximity
+                year_int = int(year_str) if year_str.isdigit() else None
+                clean_lower = cleaned.lower().strip()
+
+                def _score_candidate(c):
+                    c_title = (c.get("name") or c.get("title") or "").lower().strip()
+                    c_rel = c.get("first_air_date") or c.get("release_date") or ""
+                    c_year = int(str(c_rel)[:4]) if str(c_rel)[:4].isdigit() else None
+                    c_pop = float(c.get("popularity", 0.0) or 0.0)
+                    c_votes = int(c.get("vote_count", 0) or 0)
+                    
+                    score = c_pop + (c_votes * 0.1)
+                    
+                    # Exact title bonus
+                    if c_title == clean_lower:
+                        score += 100.0
+
+                    # Release year proximity bonus/penalty
+                    if year_int and c_year:
+                        diff = abs(c_year - year_int)
+                        if diff <= 2:
+                            score += 80.0
+                        elif diff <= 6:
+                            score += 40.0
+                        elif diff > 10:
+                            score -= 30.0
+                    return score
+
+                candidates.sort(key=_score_candidate, reverse=True)
+                top = candidates[0]
 
                 tmdb_id = top.get("id")
                 poster_path = top.get("poster_path")
@@ -1438,6 +1474,7 @@ async def get_details(detail_path: str):
             "status": "success",
             "cached": False,
             "detail_path": detail_path,
+            "title": subject.get("title") or title,
             "tmdb_id": tmdb_id,
             "media_type": "tv" if is_series else "movie",
             "logo": tmdb_info.get("logo"),
