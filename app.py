@@ -889,15 +889,53 @@ async def get_moviebox_home():
             op_type = op.get("type")
             title = op.get("title", "Featured")
             if op_type == "BANNER":
-                items = [{
-                    "name": item.get("title") or (item.get("subject") or {}).get("title"),
-                    "poster_url": item.get("image", {}).get("url") or (item.get("subject") or {}).get("cover", {}).get("url"),
-                    "slug": item.get("detailPath") or (item.get("subject") or {}).get("detailPath"),
-                    "subject_id": (item.get("subject") or {}).get("subjectId"),
-                    "badge": (item.get("subject") or {}).get("corner"),
-                    "detail_url": f"/details/{item.get('detailPath') or (item.get('subject') or {}).get('detailPath') or (item.get('subject') or {}).get('subjectId')}",
-                    "stream_url": f"/download/{item.get('detailPath') or (item.get('subject') or {}).get('detailPath') or (item.get('subject') or {}).get('subjectId')}"
-                } for item in op.get("banner", {}).get("items", []) if item.get("title") and "Communities" not in item.get("title")]
+                raw_banner_items = [
+                    item for item in op.get("banner", {}).get("items", [])
+                    if item.get("title") and "Communities" not in item.get("title")
+                ]
+                
+                # Concurrently enrich banner items with TMDB HD widescreen backdrop and logo
+                tmdb_tasks = [
+                    _resolve_tmdb_info(
+                        title=item.get("title") or (item.get("subject") or {}).get("title") or "",
+                        year=(item.get("subject") or {}).get("releaseDate", ""),
+                        is_series=((item.get("subject") or {}).get("subjectType") == 2)
+                    )
+                    for item in raw_banner_items
+                ]
+                tmdb_results = await asyncio.gather(*tmdb_tasks, return_exceptions=True)
+
+                items = []
+                for idx, item in enumerate(raw_banner_items):
+                    sub = item.get("subject") or {}
+                    name = item.get("title") or sub.get("title")
+                    slug = item.get("detailPath") or sub.get("detailPath")
+                    sid = sub.get("subjectId")
+                    orig_banner_img = item.get("image", {}).get("url")
+                    orig_poster_img = sub.get("cover", {}).get("url")
+
+                    tmdb_info = tmdb_results[idx] if (idx < len(tmdb_results) and isinstance(tmdb_results[idx], dict)) else {}
+
+                    backdrop = tmdb_info.get("backdrop") or orig_banner_img or orig_poster_img
+                    logo = tmdb_info.get("logo")
+                    logo_w500 = tmdb_info.get("logo_w500")
+                    poster = tmdb_info.get("poster") or orig_poster_img or orig_banner_img
+                    tmdb_id = tmdb_info.get("tmdb_id")
+
+                    items.append({
+                        "name": name,
+                        "banner_image": backdrop,
+                        "backdrop": backdrop,
+                        "logo": logo,
+                        "logo_w500": logo_w500,
+                        "poster_url": poster,
+                        "tmdb_id": tmdb_id,
+                        "slug": slug,
+                        "subject_id": sid,
+                        "badge": sub.get("corner"),
+                        "detail_url": f"/details/{slug or sid}",
+                        "stream_url": f"/download/{slug or sid}"
+                    })
                 if items:
                     sections.append({"section": "Banner", "count": len(items), "items": items})
             elif op_type in ["SUBJECTS_MOVIE", "SUBJECTS_TV", "SUBJECTS_ANIMATION", "CUSTOM", "SUBJECTS_SERIES"]:
