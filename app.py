@@ -1182,7 +1182,8 @@ async def _fetch_net27_stream_sources(
     ep: int = 1,
     subject_id: str = "",
     detail_path: str = "",
-    dubs: list | None = None
+    dubs: list | None = None,
+    dub: str = ""
 ) -> dict | None:
     """Fetch all high-resolution direct CDN MP4 streams and captions from Net27 engine."""
     if not tmdb_id:
@@ -1196,6 +1197,8 @@ async def _fetch_net27_stream_sources(
         url += f"&sid={subject_id}"
     if detail_path:
         url += f"&dp={detail_path}"
+    if dub:
+        url += f"&dub={dub}"
 
     if dubs:
         warm_parts = []
@@ -2014,18 +2017,17 @@ async def _resolve_moviebox_dubs(
         if r_res.status_code == 200:
             res_data = r_res.json()
             if res_data.get("ok") and res_data.get("dubs"):
+                top_dp = res_data.get("detailPath") or ""
+                top_sid = str(res_data.get("subjectId") or "")
                 for d in res_data.get("dubs", []):
                     sid = str(d.get("subjectId") or "")
-                    dp = d.get("detailPath")
-                    # Only accept real published dubs with a valid MovieBox detailPath
-                    if not dp:
-                        continue
+                    dp = d.get("detailPath") or (f"dub-{sid}" if sid else top_dp)
                     lan_name = d.get("lanName") or "Original Audio"
                     lan_code = d.get("lanCode") or "en"
                     if lan_name not in seen_dp:
                         seen_dp.add(lan_name)
                         dubs.append({
-                            "subject_id": sid,
+                            "subject_id": sid or top_sid,
                             "detail_path": dp,
                             "language_name": lan_name,
                             "language_code": lan_code,
@@ -2260,6 +2262,7 @@ async def get_tmdb_direct_stream(
     episode: int = 1,
     se: int = 0,
     ep: int = 0,
+    dub: str | None = Query(None, description="Optional dub ID or language code to stream specific dub"),
 ):
     """Direct stream extraction via TMDB ID (1080p, 720p, 480p, 360p direct CDN MP4s with MovieBox fallback)."""
     t_start = time.perf_counter()
@@ -2277,7 +2280,8 @@ async def get_tmdb_direct_stream(
     season_val = max(int(season or 1), int(se or 1)) if is_series else None
     episode_val = max(int(episode or 1), int(ep or 1)) if is_series else None
 
-    cache_key = f"download_tmdb_direct:{media_type}:{tmdb_id}:{season_val}:{episode_val}"
+    dub_param = str(dub).strip() if dub else ""
+    cache_key = f"download_tmdb_direct:{media_type}:{tmdb_id}:{season_val}:{episode_val}:{dub_param}"
     cached = _cache_get(cache_key)
     if cached is not None:
         dur = round((time.perf_counter() - t_start) * 1000, 2)
@@ -2295,7 +2299,8 @@ async def get_tmdb_direct_stream(
         tmdb_id=eff_tmdb_id,
         is_series=is_series,
         se=eff_net27_se,
-        ep=episode_val or 1
+        ep=episode_val or 1,
+        dub=dub_param
     )
     tmdb_task = get_tmdb_direct_details(tmdb_id=tmdb_id, type=media_type)
 
