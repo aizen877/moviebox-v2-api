@@ -1350,12 +1350,18 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
     except Exception:
         pass
 
-    # Fetch title logo, overview, rating, and cast credits from TMDB if TMDB ID resolved
+    # Fetch title logo, overview, rating, tagline, runtime, and cast/crew credits from TMDB
     cast_list = []
+    directors_list = []
+    writers_list = []
     overview = None
     rating = None
     genres = []
     release_date = None
+    tagline = None
+    runtime = None
+    status_text = None
+
     if tmdb_id:
         try:
             extra_url = f"https://api.themoviedb.org/3/{resolved_media_type}/{tmdb_id}?api_key={TMDB_API_KEY}&append_to_response=images,credits"
@@ -1366,15 +1372,28 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
                 rating = round(float(extra_data.get("vote_average", 0.0)), 1) if extra_data.get("vote_average") else None
                 genres = [g.get("name") for g in extra_data.get("genres", []) if g.get("name")]
                 release_date = extra_data.get("release_date") or extra_data.get("first_air_date") or ""
+                tagline = extra_data.get("tagline") or None
+                runtime = extra_data.get("runtime") or (extra_data.get("episode_run_time", [None])[0] if extra_data.get("episode_run_time") else None)
+                status_text = extra_data.get("status") or None
+                
                 raw_logos = extra_data.get("images", {}).get("logos", [])
                 logo_url, logo_w500 = _pick_best_logo(raw_logos)
-                for c in extra_data.get("credits", {}).get("cast", [])[:15]:
+
+                credits_data = extra_data.get("credits", {})
+                for c in credits_data.get("cast", [])[:15]:
                     p_path = c.get("profile_path")
                     cast_list.append({
                         "name": c.get("name"),
                         "character": c.get("character"),
                         "profile_image": f"https://image.tmdb.org/t/p/w185{p_path}" if p_path else None
                     })
+                
+                for cr in credits_data.get("crew", []):
+                    job = cr.get("job")
+                    if job == "Director" and cr.get("name") not in directors_list:
+                        directors_list.append(cr.get("name"))
+                    elif job in ("Writer", "Screenplay", "Story") and cr.get("name") not in writers_list:
+                        writers_list.append(cr.get("name"))
         except Exception:
             pass
 
@@ -1382,6 +1401,11 @@ async def _resolve_tmdb_info(title: str, year: str = "", is_series: bool | None 
         "tmdb_id": tmdb_id,
         "media_type": resolved_media_type,
         "overview": overview or (top.get("overview") if top else None),
+        "tagline": tagline,
+        "runtime": runtime,
+        "status": status_text,
+        "directors": directors_list,
+        "writers": writers_list,
         "rating": rating or (round(float(top.get("vote_average", 0.0)), 1) if (top and top.get("vote_average")) else None),
         "genres": genres,
         "release_date": release_date or (top.get("release_date") or top.get("first_air_date") if top else None),
@@ -1704,6 +1728,10 @@ async def get_details(detail_path: str):
             "title": subject.get("title") or title,
             "tmdb_id": tmdb_id,
             "media_type": "tv" if is_series else "movie",
+            "tagline": tmdb_info.get("tagline"),
+            "runtime": tmdb_info.get("runtime") or subject.get("duration"),
+            "directors": tmdb_info.get("directors", []),
+            "writers": tmdb_info.get("writers", []),
             "overview": final_overview,
             "description": final_overview,
             "rating": subject.get("imdbRatingValue") or tmdb_info.get("rating"),
