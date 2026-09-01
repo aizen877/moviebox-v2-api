@@ -1596,7 +1596,7 @@ async def get_download_links(
                 subject_id=subject_id,
                 detail_path=detail_path_slug,
                 dubs=raw_dubs,
-                dub=str(dub).strip() if dub else ""
+                dub=dub if isinstance(dub, str) else ""
             )
             if net27_data and net27_data.get("streams"):
                 has_res = True
@@ -2282,7 +2282,7 @@ async def get_tmdb_direct_stream(
     season_val = max(int(season or 1), int(se or 1)) if is_series else None
     episode_val = max(int(episode or 1), int(ep or 1)) if is_series else None
 
-    dub_param = str(dub).strip() if dub else ""
+    dub_param = dub.strip() if isinstance(dub, str) else ""
     cache_key = f"download_tmdb_direct:{media_type}:{tmdb_id}:{season_val}:{episode_val}:{dub_param}"
     cached = _cache_get(cache_key)
     if cached is not None:
