@@ -1982,20 +1982,59 @@ def _is_title_match(query_title: str, candidate_title: str) -> bool:
     return q_tokens == cand_tokens
 
 
-async def _resolve_moviebox_dubs(title: str, tmdb_id: int | None = None, is_series: bool = True) -> list[dict]:
-    """Fetch and cache available dubs/languages from MovieBox strictly for the matching title."""
+async def _resolve_moviebox_dubs(
+    title: str,
+    tmdb_id: int | None = None,
+    is_series: bool = True,
+    year: str = ""
+) -> list[dict]:
+    """Fetch and cache available dubs/languages using Net27 Aoneroom resolver as primary engine with MovieBox fallback."""
     clean = _clean_title(title)
     if not clean:
         return []
 
     media_type_key = "tv" if is_series else "movie"
-    cache_key = f"tmdb_dubs:{media_type_key}:{tmdb_id or clean}"
+    year_clean = str(year)[:4] if year else ""
+    cache_key = f"tmdb_dubs:{media_type_key}:{tmdb_id or clean}:{year_clean}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
+    client = _get_client()
     dubs = []
     seen_dp = set()
+
+    # 1. Primary Engine: Ultra-fast Net27 Aoneroom Dedicated Resolver (handles year & multi-audio matching)
+    try:
+        m_type = "tv" if is_series else "movie"
+        resolve_url = f"https://net27.cc/api/aoneroom/resolve?type={m_type}&title={quote(clean)}"
+        if year_clean:
+            resolve_url += f"&year={year_clean}"
+        r_res = await client.get(resolve_url, timeout=3.5)
+        if r_res.status_code == 200:
+            res_data = r_res.json()
+            if res_data.get("ok") and res_data.get("dubs"):
+                for d in res_data.get("dubs", []):
+                    sid = str(d.get("subjectId") or "")
+                    dp = d.get("detailPath") or sid
+                    lan_name = d.get("lanName") or "Original Audio"
+                    lan_code = d.get("lanCode") or "en"
+                    if dp and lan_name not in seen_dp:
+                        seen_dp.add(lan_name)
+                        dubs.append({
+                            "subject_id": sid,
+                            "detail_path": dp,
+                            "language_name": lan_name,
+                            "language_code": lan_code,
+                            "is_original": bool(d.get("isOriginal", False) or lan_name == "Original Audio")
+                        })
+                if dubs:
+                    _cache_set(cache_key, dubs, DETAILS_TTL)
+                    return dubs
+    except Exception as e:
+        logger.debug(f"Net27 aoneroom resolve error: {e}")
+
+    # 2. Secondary Engine: MovieBox Direct API with Strict Token Matching
     try:
         res = await _api_post(
             "/wefeed-h5api-bff/subject/search",
@@ -2165,13 +2204,13 @@ async def get_tmdb_direct_details(
                 })
         first_season_num = seasons[0]["season_number"] if seasons else 1
         eps_task = _fetch_tmdb_season_episodes(tmdb_id=tmdb_id, season_number=first_season_num)
-        dubs_task = _resolve_moviebox_dubs(title, tmdb_id, is_series=True)
+        dubs_task = _resolve_moviebox_dubs(title, tmdb_id, is_series=True, year=year)
         ep_res, dub_res = await asyncio.gather(eps_task, dubs_task, return_exceptions=True)
         episodes = ep_res if isinstance(ep_res, list) else []
         dubs = dub_res if isinstance(dub_res, list) else []
     else:
         try:
-            dubs = await _resolve_moviebox_dubs(title, tmdb_id, is_series=False)
+            dubs = await _resolve_moviebox_dubs(title, tmdb_id, is_series=False, year=year)
         except Exception:
             dubs = []
 
@@ -2459,6 +2498,18 @@ async def get_tmdb_direct_stream(
             asyncio.create_task(_fetch_net27_stream_sources(tmdb_id=tmdb_id, is_series=True, se=season_val or 1, ep=episode_val + 1))
 
     return result
+
+
+@app.get("/cache/clear")
+@app.get("/clear-cache")
+async def clear_cache():
+    """Clear memory cache instantly to wipe stale entries."""
+    count = len(_CACHE)
+    _CACHE.clear()
+    return {
+        "status": "success",
+        "message": f"Cache cleared successfully. Wiped {count} entries."
+    }
 
 
 if __name__ == "__main__":
